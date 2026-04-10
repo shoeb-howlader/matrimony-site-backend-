@@ -21,7 +21,8 @@ class Biodata extends Model
      * We use guarded = [] because of the large number of fields (70+).
      * This allows all fields to be filled via $request->all().
      */
-    protected $guarded = [];
+    // সিকিউরিটির জন্য fillable অথবা guarded ব্যবহার করুন
+    protected $guarded = ['id', 'created_at', 'updated_at'];
 
     /**
      * Automate the generation of Biodata Numbers (ODF/ODM)

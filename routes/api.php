@@ -8,9 +8,12 @@ use App\Models\District;
 use App\Models\Upazila;
 use App\Models\Union;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\AuthController;
 
 
 
+Route::post('/register', [AuthController::class, 'register']);
+Route::post('/login', [AuthController::class, 'login']);
 
 Route::get('/user', function (Request $request) {
     return $request->user();
@@ -21,13 +24,11 @@ Route::get('/test', function () {
 });
 
 // Public: Anyone can search
-Route::get('/biodatas', [BiodataController::class, 'index']);
+Route::get('/biodatas', [BiodataController::class, 'index', ]);
 
-// Protected: Must be logged in via Sanctum
-Route::middleware('auth:sanctum')->group(function () {
-    Route::post('/biodatas', [BiodataController::class, 'store']); // Submit biodata
-    Route::post('/favorites/{id}', [BiodataController::class, 'toggleFavorite']);
-});
+Route::get('/biodatas/{id}', [BiodataController::class, 'show']);
+
+
 
 // Admin Only
 Route::middleware(['auth:sanctum', 'can:admin-only'])->group(function () {
@@ -60,3 +61,27 @@ Route::get('/locations/unions/{upazila_id}', function ($upazila_id) {
 });
 
 Route::get('/metadata', [SettingController::class, 'getMetadata']);
+
+/*
+|--------------------------------------------------------------------------
+| Protected Routes (শুধুমাত্র লগইন করা ইউজাররা অ্যাক্সেস পাবে)
+|--------------------------------------------------------------------------
+*/
+Route::middleware('auth:sanctum')->group(function () {
+
+    // ইউজারের নিজস্ব তথ্য
+    Route::get('/user', function (Request $request) {
+        return $request->user();
+    });
+
+    // লগআউট
+    Route::post('/logout', [AuthController::class, 'logout']);
+
+    // বায়োডাটা জমা দেওয়া বা আপডেট করা
+    Route::post('/biodatas', [BiodataController::class, 'store']);
+    Route::put('/biodatas/{id}', [BiodataController::class, 'update']);
+
+    // প্রিয় বায়োডাটার তালিকা
+    Route::get('/favorites', [BiodataController::class, 'favorites']);
+    Route::post('/favorites/{id}', [BiodataController::class, 'toggleFavorite']);
+});

@@ -32,11 +32,11 @@ public function index(Request $request)
 
         // ২. টাইপ এবং বৈবাহিক অবস্থা
         // BiodataController.php
-if ($request->filled('type') && $request->type !== 'undefined') {
+if ($request->filled('type') && $request->type !== 'all') {
     $query->where('type', $request->type);
 }
 
-if ($request->filled('marital_status') && $request->marital_status !== 'undefined') {
+if ($request->filled('marital_status') && $request->marital_status !== 'all') {
     $query->where('marital_status', $request->marital_status);
 }
 
@@ -141,10 +141,17 @@ if ($request->filled('family_financial_statuses')) {
     /**
      * Display the specified resource.
      */
-    public function show(Biodata $biodata)
-    {
-        //
+   public function show($id)
+{
+    // রিলেশনসহ ডাটা কল করা (যেমন: presentDistrict, permanentDivision ইত্যাদি)
+    $biodata = Biodata::find($id);
+
+    if (!$biodata) {
+        return response()->json(['message' => 'বায়োডাটা পাওয়া যায়নি'], 404);
     }
+
+    return response()->json($biodata, 200);
+}
 
     /**
      * Show the form for editing the specified resource.

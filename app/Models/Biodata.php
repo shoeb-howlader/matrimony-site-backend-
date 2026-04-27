@@ -10,24 +10,31 @@ use App\Models\Division;
 use App\Models\District;
 use App\Models\Upazila;
 use App\Models\Union;
-
+use App\Models\BiodataPreference;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Biodata extends Model
 {
     use HasFactory;
+    use SoftDeletes;
 
     /**
      * The attributes that are mass assignable.
      * We use guarded = [] because of the large number of fields (70+).
      * This allows all fields to be filled via $request->all().
      */
-    // সিকিউরিটির জন্য fillable অথবা guarded ব্যবহার করুন
     protected $guarded = ['id', 'created_at', 'updated_at'];
+
+    // 🔴 এই অংশটুকু আপনার মডেলে মিসিং ছিল! এটি Array ডাটাকে ডাটাবেসে সেভ করতে সাহায্য করে।
+    protected $casts = [
+        'edu_deeni_titles' => 'array',
+        'is_verified' => 'boolean',
+    ];
 
     /**
      * Automate the generation of Biodata Numbers (ODF/ODM)
      */
-    protected static function boot()
+   /* protected static function boot()
     {
         parent::boot();
 
@@ -51,7 +58,7 @@ class Biodata extends Model
 
             $model->biodata_no = $prefix . '-' . $newNumber;
         });
-    }
+    }*/
 
     /**
      * Relationship: A Biodata belongs to a User account.
@@ -61,20 +68,17 @@ class Biodata extends Model
         return $this->belongsTo(User::class);
     }
 
-    // বর্তমান জেলার রিলেশন
+    // ════════════ বর্তমান ঠিকানা (Present Address) ════════════
+    public function presentDivision()
+    {
+        return $this->belongsTo(Division::class, 'present_division_id');
+    }
+
     public function presentDistrict()
     {
         return $this->belongsTo(District::class, 'present_district_id');
     }
 
-    // স্থায়ী জেলার রিলেশন (যা আপনার এরর দিচ্ছে)
-    public function permanentDistrict()
-    {
-        return $this->belongsTo(District::class, 'permanent_district_id');
-    }
-
-
-    // ইচ্ছা করলে উপজেলা এবং ইউনিয়নের রিলেশনও যোগ করতে পারেন
     public function presentUpazila()
     {
         return $this->belongsTo(Upazila::class, 'present_upazila_id');
@@ -85,6 +89,37 @@ class Biodata extends Model
         return $this->belongsTo(Union::class, 'present_union_id');
     }
 
+    // ════════════ স্থায়ী ঠিকানা (Permanent Address) ════════════
+    public function permanentDivision()
+    {
+        return $this->belongsTo(Division::class, 'permanent_division_id');
+    }
+
+    public function permanentDistrict()
+    {
+        return $this->belongsTo(District::class, 'permanent_district_id');
+    }
+
+    public function permanentUpazila()
+    {
+        return $this->belongsTo(Upazila::class, 'permanent_upazila_id');
+    }
+
+    public function permanentUnion()
+    {
+        return $this->belongsTo(Union::class, 'permanent_union_id');
+    }
+
+    public function views()
+{
+    return $this->hasMany(BiodataView::class, 'biodata_id');
+}
+
+   // 🔴 রিলেশনশিপটি আপনার মডেলের নাম অনুযায়ী হবে 🔴
+    public function preferences()
+    {
+        return $this->hasMany(BiodataPreference::class, 'biodata_id');
+    }
     /**
      * Scope for approved profiles only (Used in your search page)
      */
@@ -92,6 +127,4 @@ class Biodata extends Model
     {
         return $query->where('status', 'approved');
     }
-
-
 }

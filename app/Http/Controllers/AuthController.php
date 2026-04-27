@@ -30,7 +30,8 @@ class AuthController extends Controller
         return response()->json([
             'message' => 'রেজিস্ট্রেশন সফল হয়েছে',
             'user' => $user,
-            'token' => $token
+            'token' => $token,
+            'total_connections' => $user->total_connections, // নতুন ফিল্ড রেসপন্সে যুক্ত করা হয়েছে
         ], 201);
     }
 
@@ -48,6 +49,12 @@ class AuthController extends Controller
         }
 
         $token = $user->createToken('auth_token')->plainTextToken;
+        // লগইন সফল হওয়ার পর (ইউজারের টোকেন জেনারেট হওয়ার আগে বা পরে)
+\App\Models\LoginHistory::create([
+    'user_id' => $user->id,          // লগইন করা ইউজারের আইডি
+    'ip_address' => $request->ip(),  // আইপি অ্যাড্রেস
+    'user_agent' => $request->userAgent(), // ডিভাইস ও ব্রাউজারের নাম
+]);
 
         return response()->json([
             'message' => 'লগইন সফল',
@@ -60,5 +67,56 @@ class AuthController extends Controller
     {
         $request->user()->currentAccessToken()->delete();
         return response()->json(['message' => 'সফলভাবে লগআউট হয়েছেন']);
+    }
+
+    /**
+     * 2. পাসওয়ার্ড পরিবর্তনের লজিক
+     */
+    public function changePassword(Request $request)
+    {
+        // ভ্যালিডেশন (ফ্রন্টএন্ডের ফিল্ডের নামের সাথে মিলিয়ে)
+        $request->validate([
+            'current_password' => 'required',
+            'new_password' => 'required|min:8',
+            'confirm_password' => 'required|same:new_password',
+        ]);
+
+        $user = auth()->user();
+
+        // বর্তমান পাসওয়ার্ড সঠিক কি না তা চেক করা
+        if (!Hash::check($request->current_password, $user->password)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'আপনার বর্তমান পাসওয়ার্ডটি সঠিক নয়।'
+            ], 400); // 400 Bad Request
+        }
+
+        // নতুন পাসওয়ার্ড সেভ করা
+        $user->password = Hash::make($request->new_password);
+        $user->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'পাসওয়ার্ড সফলভাবে পরিবর্তন করা হয়েছে।'
+        ]);
+    }
+
+    /**
+     * একাউন্ট স্থায়ীভাবে ডিলিট করার লজিক
+     */
+    public function deleteAccount(Request $request)
+    {
+        $user = auth()->user();
+
+        // ⚠️ সতর্কতা: যদি ডাটাবেজে Foreign Key-তে OnDelete('cascade') না থাকে,
+        // তবে ইউজারের অন্যান্য ডাটা (বায়োডাটা, ফেভারিটস ইত্যাদি) ম্যানুয়ালি ডিলিট করতে হবে।
+        // যেমন: $user->biodata()->delete();
+
+        $user->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'আপনার একাউন্ট স্থায়ীভাবে মুছে ফেলা হয়েছে।'
+        ]);
     }
 }

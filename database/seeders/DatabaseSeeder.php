@@ -5,6 +5,10 @@ namespace Database\Seeders;
 use App\Models\User;
 use App\Models\Biodata;
 use Illuminate\Database\Seeder;
+use Database\Seeders\LocationSeeder;
+use Database\Seeders\SettingSeeder;
+use Database\Seeders\BiodataSeeder;
+use Database\Seeders\ConnectionPackageSeeder;
 
 class DatabaseSeeder extends Seeder
 {
@@ -20,6 +24,7 @@ class DatabaseSeeder extends Seeder
         LocationSeeder::class, // আপনার আগের লোকেশন সিডার
         SettingSeeder::class,  // নতুন সেটিং সিডার
         BiodataSeeder::class,  // বায়োডাটা জেনারেটর
+        ConnectionPackageSeeder::class,
     ]);
     }
 }

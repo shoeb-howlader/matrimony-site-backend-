@@ -279,4 +279,8 @@ Route::post('/user/{id}/admin-note', [AdminUserController::class, 'updateAdminNo
 Route::post('/user/{id}/impersonate', [AdminUserController::class, 'impersonateUser']);
 Route::get('/user/{id}/login-history', [AdminUserController::class, 'getUserLoginHistory']);
 
+// 🔴 ডিলিট লগ দেখা এবং রিস্টোর করার নতুন রাউট
+Route::get('/biodata/{id}/delete-log', [App\Http\Controllers\Admin\AdminBiodataController::class, 'getDeleteLog']);
+Route::post('/biodata/{id}/restore', [App\Http\Controllers\Admin\AdminBiodataController::class, 'restoreBiodata']);
+
 });

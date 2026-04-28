@@ -15,8 +15,10 @@ use App\Models\PurchasedBiodata;
 use App\Models\BiodataView;
 use App\Models\BiodataPreference;
 use App\Models\SupportTicket;
+use App\Models\LoginHistory;
+use App\Models\UserRestrictionLog;
 
-#[Fillable(['name', 'email', 'password', 'total_connections', 'role', 'restriction_expires_at',])]
+#[Fillable(['name', 'email', 'password', 'total_connections', 'role', 'restriction_expires_at', 'restriction_reason'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
@@ -28,6 +30,7 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'total_connections' => 'integer',
+
         ];
     }
 
@@ -74,5 +77,10 @@ class User extends Authenticatable
     // লগইন হিস্ট্রি
     public function loginHistories() {
         return $this->hasMany(\App\Models\LoginHistory::class, 'user_id')->latest();
+    }
+
+    // ইউজারের রেস্ট্রিকশন হিস্ট্রি বা লগ
+    public function restrictionLogs() {
+        return $this->hasMany(UserRestrictionLog::class, 'user_id')->latest();
     }
 }

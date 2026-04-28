@@ -6,13 +6,27 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use App\Notifications\UserAlertNotification;
+use App\Models\UserRestrictionLog;
 
 class AdminUserController extends Controller
 {
-    public function getUsers(Request $request)
+   public function getUsers(Request $request)
     {
-        $query = User::select('users.id', 'users.name', 'users.email', 'users.mobile', 'users.role', 'users.status', 'users.created_at')
-                     ->with('biodata:id,user_id,biodata_no,status');
+        // 🔴 এখানে 'users.restriction_expires_at' এবং 'users.restriction_reason' যোগ করা হয়েছে
+        $query = User::select(
+            'users.id',
+            'users.name',
+            'users.email',
+            'users.mobile',
+            'users.role',
+            'users.status',
+            'users.created_at',
+            'users.restriction_expires_at', // 👈 নতুন কলাম
+            'users.restriction_reason'      // 👈 নতুন কলাম
+        )
+        ->with(['biodata' => function($q) {
+            $q->withTrashed()->select('id', 'user_id', 'biodata_no', 'status', 'deleted_at');
+        }]);
 
         $query->when($request->start_date, fn ($q) => $q->whereDate('users.created_at', '>=', $request->start_date));
         $query->when($request->end_date, fn ($q) => $q->whereDate('users.created_at', '<=', $request->end_date));
@@ -25,28 +39,44 @@ class AdminUserController extends Controller
                          ->orWhere('users.mobile', 'LIKE', "%{$search}%")
                          ->orWhere('users.id', 'LIKE', "%{$search}%")
                          ->orWhereHas('biodata', function($b) use ($search) {
-                             $b->where('biodata_no', 'LIKE', "%{$search}%")
-                               ->orWhere('name', 'LIKE', "%{$search}%")
-                               ->orWhere('candidate_mobile_number', 'LIKE', "%{$search}%")
-                               ->orWhere('guardian_mobile', 'LIKE', "%{$search}%");
+                             $b->withTrashed()->where(function($bSub) use ($search) {
+                                 $bSub->where('biodata_no', 'LIKE', "%{$search}%")
+                                      ->orWhere('name', 'LIKE', "%{$search}%")
+                                      ->orWhere('candidate_mobile_number', 'LIKE', "%{$search}%")
+                                      ->orWhere('guardian_mobile', 'LIKE', "%{$search}%");
+                             });
                          });
             });
         });
 
         $query->when($request->role && strtolower($request->role) !== 'all', fn ($q) => $q->where('users.role', $request->role));
-        $query->when($request->status && strtolower($request->status) !== 'all', fn ($q) => $q->where('users.status', $request->status));
-        $query->when($request->has_biodata && $request->has_biodata !== 'all', function ($q) use ($request) {
-            return $request->has_biodata === 'yes' ? $q->whereHas('biodata') : $q->doesntHave('biodata');
+
+        $query->when($request->status && strtolower($request->status) !== 'all', function ($q) use ($request) {
+            if ($request->status === 'restricted') {
+                return $q->whereNotNull('users.restriction_expires_at')
+                         ->where('users.restriction_expires_at', '>', now());
+            } else {
+                return $q->where('users.status', $request->status);
+            }
         });
+
+        $query->when($request->has_biodata && $request->has_biodata !== 'all', function ($q) use ($request) {
+            return $request->has_biodata === 'yes' ? $q->whereHas('biodata', fn($b) => $b->withTrashed()) : $q->whereDoesntHave('biodata', fn($b) => $b->withTrashed());
+        });
+
         $query->when($request->biodata_status && strtolower($request->biodata_status) !== 'all', function ($q) use ($request) {
-            return $q->whereHas('biodata', fn($b) => $b->where('status', $request->biodata_status));
+            if ($request->biodata_status === 'deleted') {
+                return $q->whereHas('biodata', fn($b) => $b->onlyTrashed());
+            } else {
+                return $q->whereHas('biodata', fn($b) => $b->where('status', $request->biodata_status)->whereNull('deleted_at'));
+            }
         });
 
         $sortBy = $request->sort_by ?? 'created_at';
         $sortDir = $request->sort_dir ?? 'desc';
 
         if ($sortBy === 'biodata_no') {
-            $query->orderBy(\App\Models\Biodata::select('biodata_no')->whereColumn('biodatas.user_id', 'users.id'), $sortDir);
+            $query->orderBy(\App\Models\Biodata::select('biodata_no')->withTrashed()->whereColumn('biodatas.user_id', 'users.id'), $sortDir);
         } else {
             $allowedSorts = ['id', 'name', 'email', 'mobile', 'created_at'];
             if (in_array($sortBy, $allowedSorts)) {
@@ -83,12 +113,14 @@ class AdminUserController extends Controller
     }
 
 // ─── 🔴 User Details with Stats, Suspicious Check & Restriction ───
+   // ─── 🔴 ২. ইউজারের বিস্তারিত এবং রেস্ট্রিকশন হিস্ট্রি পাঠানো ───
     public function getUserDetails($id)
     {
-        $user = User::with(['biodata' => fn($q) => $q->withTrashed()])->findOrFail($id);
+        // 🔴 restrictionLogs রিলেশনটি কল করা হলো
+        $user = User::with(['biodata' => fn($q) => $q->withTrashed(), 'restrictionLogs'])->findOrFail($id);
         $data = $user->toArray();
 
-        // Total Spent & Other Stats (আগের মতোই থাকবে)
+        // Total Spent & Other Stats
         $data['total_spent'] = \App\Models\Transaction::where('user_id', $user->id)->whereIn('status', ['success', 'completed', 'paid'])->sum('amount');
         $data['views_count'] = $user->biodata ? \App\Models\BiodataView::where('biodata_id', $user->biodata->id)->count() : 0;
         $data['visits_count'] = \App\Models\BiodataView::where('viewer_id', $user->id)->count();
@@ -102,12 +134,12 @@ class AdminUserController extends Controller
         $data['disliked_by_count'] = $user->biodata ? \App\Models\BiodataPreference::where('biodata_id', $user->biodata->id)->where('type', 'ignore')->count() : 0;
         $data['unlocked_by_count'] = $user->biodata ? \App\Models\PurchasedBiodata::where('biodata_id', $user->biodata->id)->count() : 0;
 
-        // 🔴 Fake Delete Checker: গত ৩০ দিনে কয়বার ডিলিট করেছে
+        // Fake Delete Checker
         $recentDeletesCount = \App\Models\BiodataDeletionLog::where('user_id', $user->id)
             ->where('created_at', '>=', now()->subDays(30))
             ->count();
         $data['recent_delete_count'] = $recentDeletesCount;
-        $data['is_suspicious'] = $recentDeletesCount > 1; // একের বেশি হলে Suspicious
+        $data['is_suspicious'] = $recentDeletesCount > 1;
 
         // Deletion Logs Fetch
         $logs = \App\Models\BiodataDeletionLog::where('user_id', $user->id)->latest()->get();
@@ -118,7 +150,11 @@ class AdminUserController extends Controller
             $logArr['biodata_id'] = $trashedBio ? $trashedBio->id : null;
             $deletionLogsArray[] = $logArr;
         }
+
         $data['deletion_logs'] = $deletionLogsArray;
+
+        // 🔴 রেস্ট্রিকশন লগের ডাটা অ্যারেতে যুক্ত করা হলো
+        $data['restriction_logs'] = $user->restrictionLogs;
 
         $data['packages'] = \App\Models\ConnectionPackage::select('id', 'name')->get();
 
@@ -430,22 +466,7 @@ class AdminUserController extends Controller
         return response()->json(['success' => false, 'message' => 'বায়োডাটা পাওয়া যায়নি!']);
     }
 
-    // ─── 🔴 রেস্ট্রিকশন ম্যানুয়ালি তুলে নেওয়া এবং নোটিফিকেশন ───
-    public function removeRestriction($id)
-    {
-        $user = User::findOrFail($id);
-        $user->restriction_expires_at = null;
-        $user->save();
 
-        // 📩 🔴 ইউজারকে নোটিফিকেশন পাঠানো
-        $user->notify(new UserAlertNotification(
-            'অ্যাকাউন্ট রেস্ট্রিকশন বাতিল',
-            'আপনার অ্যাকাউন্টের ওপর থাকা রেস্ট্রিকশন অ্যাডমিন কর্তৃক তুলে নেওয়া হয়েছে। আপনি এখন নতুন বায়োডাটা তৈরি করতে পারবেন।',
-            '/user/dashboard'
-        ));
-
-        return response()->json(['success' => true, 'message' => 'অ্যাকাউন্টের রেস্ট্রিকশন তুলে নেওয়া হয়েছে এবং নোটিফিকেশন পাঠানো হয়েছে!']);
-    }
 
 public function getAllDeletionLogs(Request $request)
 {
@@ -568,5 +589,69 @@ public function getAllDeletionLogs(Request $request)
         return response()->json(['success' => true, 'data' => $data, 'total' => $data->total()]);
     }
 
+
     public function exportUsers(Request $request) { /* Your existing export logic */ }
+
+// ─── 🔴 ১. ইউজারকে রেস্ট্রিক্ট করার ফাংশন (হিস্ট্রি সেভ সহ) ───
+    public function restrictUser(Request $request, $id) {
+        $request->validate([
+            'days' => 'required|integer',
+            'reason' => 'nullable|string|max:1000'
+        ]);
+
+        $user = User::findOrFail($id);
+
+        // 🔴 সমাধান: (int) দিয়ে ভ্যালুটিকে স্ট্রিং থেকে নাম্বারে কনভার্ট করা হয়েছে
+        $days = (int) $request->days;
+        $expiresAt = now()->addDays($days);
+
+        // বর্তমান রেস্ট্রিকশনের মেয়াদ এবং কারণ আপডেট করা হচ্ছে
+        $user->restriction_expires_at = $expiresAt;
+        $user->restriction_reason = $request->reason;
+        $user->save();
+
+        // রেস্ট্রিকশন হিস্ট্রি (Log) ডাটাবেসে সেভ করা হচ্ছে
+        \App\Models\UserRestrictionLog::create([
+            'user_id'         => $user->id,
+            'restricted_days' => $days, // 👈 এখানেও $days ভেরিয়েবল ব্যবহার করা হলো
+            'reason'          => $request->reason ?? 'কোনো কারণ উল্লেখ করা হয়নি',
+            'expires_at'      => $expiresAt,
+        ]);
+
+        // ইউজারকে নোটিফিকেশন পাঠানো
+        $user->notify(new \App\Notifications\UserAlertNotification(
+            'অ্যাকাউন্ট রেস্ট্রিক্টেড!',
+            "আপনার অ্যাকাউন্ট সাময়িকভাবে রেস্ট্রিক্ট করা হয়েছে। কারণ: " . ($request->reason ?? 'কমিউনিটি গাইডলাইন ভঙ্গ'),
+            '/user/dashboard'
+        ));
+
+        return response()->json(['success' => true, 'message' => 'ইউজারকে সফলভাবে রেস্ট্রিক্ট করা হয়েছে।']);
+    }
+
+ // ─── 🔴 ২. রেস্ট্রিকশন ম্যানুয়ালি তুলে নেওয়ার ফাংশন ───
+    public function removeRestriction($id)
+    {
+        $user = User::findOrFail($id);
+
+        // রেস্ট্রিকশনের মেয়াদ এবং কারণ মুছে ফেলা হচ্ছে
+        $user->restriction_expires_at = null;
+        $user->restriction_reason = null;
+        $user->save();
+
+        // 🔴 নতুন আপডেট: লগ (History) টেবিলেও বর্তমান মেয়াদ শেষ করে দেওয়া হচ্ছে
+        $latestLog = \App\Models\UserRestrictionLog::where('user_id', $user->id)->latest()->first();
+        if ($latestLog) {
+            $latestLog->expires_at = now(); // মেয়াদ ম্যানুয়ালি আজকে শেষ করে দেওয়া হলো
+            $latestLog->save();
+        }
+
+        // 📩 ইউজারকে নোটিফিকেশন পাঠানো
+        $user->notify(new \App\Notifications\UserAlertNotification(
+            'অ্যাকাউন্ট রেস্ট্রিকশন বাতিল',
+            'আপনার অ্যাকাউন্টের ওপর থাকা রেস্ট্রিকশন অ্যাডমিন কর্তৃক তুলে নেওয়া হয়েছে। আপনি এখন নতুন বায়োডাটা তৈরি করতে পারবেন।',
+            '/user/dashboard'
+        ));
+
+        return response()->json(['success' => true, 'message' => 'অ্যাকাউন্টের রেস্ট্রিকশন তুলে নেওয়া হয়েছে এবং নোটিফিকেশন পাঠানো হয়েছে!']);
+    }
 }

@@ -8,31 +8,39 @@ use App\Models\SupportTicket;
 use Illuminate\Support\Facades\Storage;
 use App\Models\User;
 use App\Models\Biodata;
-use App\Models\HasFactory;
 
 class SupportTicketController extends Controller
 {
     // ── ১. সব সাপোর্ট টিকিট লোড করা (ফিল্টার ও সার্চ সহ) ──
-public function index(Request $request)
+    public function index(Request $request)
     {
-        // টিকিট, ইউজার এবং ইউজারের বায়োডাটা রিলেশনসহ কুয়েরি
-        $query = SupportTicket::with(['user.biodata']);
+        // 🔴 অভিযোগকারী (user.biodata) এবং অভিযুক্ত (reportedBiodata.user) উভয়ের রিলেশন আনা হচ্ছে
+        $query = SupportTicket::with(['user.biodata', 'reportedBiodata.user']);
 
-        // ১. সার্চ ফিল্টার (নাম, আইডি, ইমেইল, মোবাইল, বায়োডাটা নং, টিকিট সাবজেক্ট)
+        // ১. বিস্তারিত সার্চ ফিল্টার
         if ($request->search) {
             $search = $request->search;
             $query->where(function($q) use ($search) {
                 $q->where('id', 'like', "%{$search}%")
                   ->orWhere('subject', 'like', "%{$search}%")
-                  ->orWhere('biodata_no', 'like', "%{$search}%") // অভিযোগের বায়োডাটা নং
+                  ->orWhere('biodata_no', 'like', "%{$search}%") // 🔴 অভিযুক্ত বায়োডাটা নং দিয়ে সার্চ
+
+                  // 🔴 অভিযোগকারীর (Reporter) তথ্য দিয়ে সার্চ
                   ->orWhereHas('user', function($uq) use ($search) {
                       $uq->where('id', 'like', "%{$search}%")
                         ->orWhere('name', 'like', "%{$search}%")
                         ->orWhere('email', 'like', "%{$search}%")
                         ->orWhere('mobile', 'like', "%{$search}%")
                         ->orWhereHas('biodata', function($bq) use ($search) {
-                            $bq->where('biodata_no', 'like', "%{$search}%"); // ইউজারের নিজস্ব বায়োডাটা নং
+                            $bq->where('biodata_no', 'like', "%{$search}%"); // অভিযোগকারীর বায়োডাটা নং
                         });
+                  })
+
+                  // 🔴 অভিযুক্ত ব্যক্তির (Reported Owner) তথ্য দিয়ে সার্চ
+                  ->orWhereHas('reportedBiodata.user', function($ruq) use ($search) {
+                       $ruq->where('name', 'like', "%{$search}%")
+                           ->orWhere('mobile', 'like', "%{$search}%")
+                           ->orWhere('email', 'like', "%{$search}%");
                   });
             });
         }
@@ -47,8 +55,18 @@ public function index(Request $request)
             $query->where('category', $request->category);
         }
 
-        // পেজিনেশন ও সর্টিং
-        $tickets = $query->latest()->paginate($request->per_page ?? 20);
+        // 🔴 ৪. ডাইনামিক সর্টিং (তারিখ অনুযায়ী)
+        $sortBy = $request->sort_by ?? 'created_at';
+        $sortDir = $request->sort_dir ?? 'desc';
+
+        $allowedSorts = ['created_at', 'id'];
+        if (in_array($sortBy, $allowedSorts)) {
+            $query->orderBy($sortBy, $sortDir);
+        } else {
+            $query->latest();
+        }
+
+        $tickets = $query->paginate($request->per_page ?? 20);
 
         // Stats ক্যালকুলেশন
         $stats = [
@@ -64,13 +82,9 @@ public function index(Request $request)
         ]);
     }
 
-
-
-
-  // ── ২. নির্দিষ্ট একটি টিকিটের বিস্তারিত দেখা ──
+    // ── ২. নির্দিষ্ট একটি টিকিটের বিস্তারিত দেখা ──
     public function show($id)
     {
-        // 🔴 mobile_number এর বদলে mobile করা হয়েছে
         $ticket = SupportTicket::with('user:id,name,email,mobile')->findOrFail($id);
 
         return response()->json([
@@ -80,7 +94,6 @@ public function index(Request $request)
     }
 
     // ── ৩. অ্যাডমিন রিপ্লাই দেওয়া এবং স্ট্যাটাস আপডেট করা ──
-// ── ৩. অ্যাডমিন রিপ্লাই দেওয়া এবং স্ট্যাটাস আপডেট করা ──
     public function reply(Request $request, $id)
     {
         $request->validate([
@@ -94,10 +107,11 @@ public function index(Request $request)
             'admin_reply' => $request->admin_reply,
             'status' => $request->status
         ]);
-        // 🔴 ইউজারের কাছে নোটিফিকেশন পাঠানো
-    if ($ticket->user) {
-        $ticket->user->notify(new TicketResolvedNotification($ticket));
-    }
+
+        // ইউজারের কাছে নোটিফিকেশন পাঠানো
+        if ($ticket->user) {
+            $ticket->user->notify(new \App\Notifications\TicketResolvedNotification($ticket));
+        }
 
         return response()->json([
             'success' => true,
@@ -106,7 +120,6 @@ public function index(Request $request)
     }
 
     // ── ৪. অপ্রয়োজনীয় বা স্প্যাম টিকিট ডিলিট করা ──
-  // ── ۴. অপ্রয়োজনীয় বা স্প্যাম টিকিট ডিলিট করা ──
     public function destroy($id)
     {
         $ticket = SupportTicket::findOrFail($id);

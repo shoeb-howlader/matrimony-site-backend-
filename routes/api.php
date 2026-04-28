@@ -267,7 +267,7 @@ Route::post('/user/{id}/toggle-visibility', [AdminUserController::class, 'toggle
 Route::post('/user/{id}/restore-biodata', [AdminUserController::class, 'restoreBiodata']);
 
 //
-Route::post('/user/{id}/remove-restriction', [AdminUserController::class, 'removeRestriction']);
+
 
 //
 Route::get('/biodata-deletion-logs', [AdminUserController::class, 'getAllDeletionLogs']);
@@ -282,5 +282,8 @@ Route::get('/user/{id}/login-history', [AdminUserController::class, 'getUserLogi
 // 🔴 ডিলিট লগ দেখা এবং রিস্টোর করার নতুন রাউট
 Route::get('/biodata/{id}/delete-log', [App\Http\Controllers\Admin\AdminBiodataController::class, 'getDeleteLog']);
 Route::post('/biodata/{id}/restore', [App\Http\Controllers\Admin\AdminBiodataController::class, 'restoreBiodata']);
+// 🔴 ইউজার রেস্ট্রিক্ট এবং রিমুভ রেস্ট্রিকশন রাউট
+Route::post('/user/{id}/restrict', [AdminUserController::class, 'restrictUser']);
+Route::post('/user/{id}/remove-restriction', [AdminUserController::class, 'removeRestriction']);
 
 });

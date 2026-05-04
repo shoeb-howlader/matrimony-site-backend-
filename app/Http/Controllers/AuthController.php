@@ -14,14 +14,15 @@ class AuthController extends Controller
         $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
-            'phone' => 'nullable|string|max:15',
+            'mobile' => 'required|string|max:15|unique:users,mobile',
             'password' => 'required|string|min:8|confirmed',
+            'gender' => 'required|in:male,female',
         ]);
 
         $user = User::create([
             'name' => $request->name,
             'email' => $request->email,
-            'phone' => $request->phone,
+            'mobile' => $request->mobile,
             'password' => Hash::make($request->password),
         ]);
 
@@ -35,26 +36,33 @@ class AuthController extends Controller
         ], 201);
     }
 
-    public function login(Request $request)
+  public function login(Request $request)
     {
+        // ১. email এর বদলে login_id দিয়ে ভ্যালিডেশন
         $request->validate([
-            'email' => 'required|email',
+            'login_id' => 'required|string',
             'password' => 'required',
         ]);
 
-        $user = User::where('email', $request->email)->first();
+        // ২. ইমেইল অথবা মোবাইল—যেকোনো একটি দিয়ে ইউজারকে খোঁজা
+        $user = User::where('email', $request->login_id)
+                    ->orWhere('mobile', $request->login_id)
+                    ->first();
 
+        // ৩. ইউজার না পেলে বা পাসওয়ার্ড ভুল হলে
         if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json(['message' => 'ইমেইল অথবা পাসওয়ার্ড সঠিক নয়।'], 401);
+            return response()->json(['message' => 'ইমেইল/মোবাইল অথবা পাসওয়ার্ড সঠিক নয়।'], 401);
         }
 
+        // ৪. Sanctum টোকেন জেনারেট
         $token = $user->createToken('auth_token')->plainTextToken;
-        // লগইন সফল হওয়ার পর (ইউজারের টোকেন জেনারেট হওয়ার আগে বা পরে)
-\App\Models\LoginHistory::create([
-    'user_id' => $user->id,          // লগইন করা ইউজারের আইডি
-    'ip_address' => $request->ip(),  // আইপি অ্যাড্রেস
-    'user_agent' => $request->userAgent(), // ডিভাইস ও ব্রাউজারের নাম
-]);
+
+        // ৫. আপনার চমৎকার Login History ফিচারটি এখানে কাজ করবে
+        \App\Models\LoginHistory::create([
+            'user_id' => $user->id,          // লগইন করা ইউজারের আইডি
+            'ip_address' => $request->ip(),  // আইপি অ্যাড্রেস
+            'user_agent' => $request->userAgent(), // ডিভাইস ও ব্রাউজারের নাম
+        ]);
 
         return response()->json([
             'message' => 'লগইন সফল',
@@ -99,6 +107,26 @@ class AuthController extends Controller
             'success' => true,
             'message' => 'পাসওয়ার্ড সফলভাবে পরিবর্তন করা হয়েছে।'
         ]);
+    }
+    public function completeProfile(Request $request)
+    {
+        $request->validate([
+            'gender' => 'required|in:male,female',
+            'mobile' => 'required|string|max:15|unique:users,mobile,' . $request->user()->id, // নিজের মোবাইল নাম্বার চেক করা এড়ানোর জন্য id পাস করা হলো
+        ]);
+
+        $user = $request->user();
+
+        $user->update([
+            'gender' => $request->gender,
+            'mobile' => $request->mobile,
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'প্রোফাইল সফলভাবে আপডেট হয়েছে।',
+            'user' => $user
+        ], 200);
     }
 
     /**

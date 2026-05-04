@@ -63,41 +63,95 @@ class PreferenceController extends Controller
         return response()->json(['success' => true, 'message' => $message]);
     }
 
-    // ইউজারের পছন্দের (Favorite) বায়োডাটাগুলো বের করা
+// ইউজারের পছন্দের (Favorite) বায়োডাটাগুলো বের করা
     public function getFavorites()
     {
         $userId = auth()->id();
 
-        // 🔴 ফিক্স: with() ব্যবহার করে রিলেশনগুলো (Eager Loading) লোড করা হয়েছে
-        $biodatas = Biodata::with(['presentDistrict']) // আপনার যদি আরও রিলেশন থাকে যেমন occupation, সেগুলো এখানে কমা দিয়ে যুক্ত করবেন
-            ->whereHas('preferences', function ($query) use ($userId) {
-                $query->where('user_id', $userId)->where('type', 'favorite');
-            })
-            // আপনি চাইলে এখানে ->where('status', 'approved') যুক্ত করতে পারেন যদি শুধু লাইভ বায়োডাটা দেখাতে চান
+        $preferences = \App\Models\BiodataPreference::where('user_id', $userId)
+            ->where('type', 'favorite')
+            ->with(['biodata' => function($query) {
+                $query->withTrashed()->with('presentDistrict');
+            }])
+            ->orderBy('created_at', 'desc')
             ->get();
+
+        $formattedData = $preferences->map(function ($pref) {
+            $biodata = $pref->biodata;
+            if (!$biodata) return null;
+
+            // ফ্রন্টএন্ডের জন্য ফিল্ডগুলো ম্যাপ করে দেওয়া হচ্ছে
+            $biodata->is_deleted = $biodata->trashed();
+            $biodata->added_at = $pref->created_at;
+            $biodata->note = $pref->note; // 🔴 ইউজারের প্রাইভেট নোট
+            $biodata->updated_at = $biodata->updated_at; // 🔴 আপডেট ব্যাজের জন্য
+
+            return $biodata;
+        })->filter()->values();
 
         return response()->json([
             'success' => true,
-            'data' => $biodatas
+            'data' => $formattedData
         ]);
     }
 
-    // ইউজারের অপছন্দের (Ignored) বায়োডাটাগুলো বের করা
+// 🔴 একটিমাত্র ফাংশন যা Favorite এবং Ignore দুই জায়গার নোটই সেভ করবে
+    public function saveNote(Request $request)
+    {
+        $request->validate([
+            'biodata_id' => 'required|exists:biodatas,id',
+            'note' => 'nullable|string|max:1000'
+        ]);
+
+        // এখানে type (favorite/ignore) চেক না করে শুধু ইউজার এবং বায়োডাটা আইডি চেক করা হচ্ছে
+        $preference = \App\Models\BiodataPreference::where('user_id', auth()->id())
+            ->where('biodata_id', $request->biodata_id)
+            ->first();
+
+        if ($preference) {
+            $preference->note = $request->note;
+            $preference->save();
+            return response()->json(['success' => true, 'message' => 'নোট সফলভাবে সেভ হয়েছে।']);
+        }
+
+        return response()->json(['success' => false, 'message' => 'বায়োডাটাটি তালিকায় পাওয়া যায়নি।'], 404);
+    }
+
+// ইউজারের অপছন্দের (Ignored) বায়োডাটাগুলো বের করা
     public function getIgnores()
     {
         $userId = auth()->id();
 
-        // 🔴 ফিক্স: N+1 প্রবলেম এড়াতে with() ব্যবহার করা হয়েছে
-        $biodatas = Biodata::with(['presentDistrict'])
-            ->whereHas('preferences', function ($query) use ($userId) {
-                $query->where('user_id', $userId)->where('type', 'ignore');
-            })->get();
+        // 🔴 BiodataPreference থেকে কোয়েরি করে সাথে biodata আনা হচ্ছে (with নোট এবং deleted data)
+        $preferences = \App\Models\BiodataPreference::where('user_id', $userId)
+            ->where('type', 'ignore')
+            ->with(['biodata' => function($query) {
+                // withTrashed() এর মাধ্যমে ডিলিট হওয়া প্রোফাইলগুলোও আসবে
+                $query->withTrashed()->with('presentDistrict');
+            }])
+            ->orderBy('created_at', 'desc') // ডিফল্টভাবে নতুন যোগ করাগুলো আগে
+            ->get();
+
+        $formattedData = $preferences->map(function ($pref) {
+            $biodata = $pref->biodata;
+            if (!$biodata) return null;
+
+            // ফ্রন্টএন্ডের জন্য ফিল্ডগুলো ম্যাপ করে দেওয়া হচ্ছে
+            $biodata->is_deleted = $biodata->trashed();
+            $biodata->added_at = $pref->created_at;
+            $biodata->note = $pref->note; // 🔴 ইউজারের প্রাইভেট নোট
+            $biodata->updated_at = $biodata->updated_at;
+
+            return $biodata;
+        })->filter()->values();
 
         return response()->json([
             'success' => true,
-            'data' => $biodatas
+            'data' => $formattedData
         ]);
     }
+
+
 
     /**
  * ইউজারের বায়োডাটা কতজন পছন্দের তালিকায় রেখেছে তার সংখ্যা বের করা

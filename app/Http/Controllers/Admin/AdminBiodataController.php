@@ -11,9 +11,10 @@ use Illuminate\Support\Facades\DB;
 
 class AdminBiodataController extends Controller
 {
-    public function getPendingBiodatas(Request $request)
+  public function getPendingBiodatas(Request $request)
     {
-        $query = Biodata::select('id', 'user_id', 'biodata_no', 'name', 'type', 'candidate_mobile_number', 'updated_at')
+        // 🔴 এখানে select এর ভেতর 'guardian_mobile' এবং 'guardian_relationship' যোগ করা হয়েছে
+        $query = Biodata::select('id', 'user_id', 'biodata_no', 'name', 'type', 'candidate_mobile_number', 'guardian_mobile', 'guardian_relationship', 'updated_at')
             ->with('user:id,email')
             ->where('status', 'pending');
 
@@ -22,6 +23,7 @@ class AdminBiodataController extends Controller
             return $q->where(function($subQuery) use ($search) {
                 $subQuery->where('name', 'LIKE', "%{$search}%")
                          ->orWhere('candidate_mobile_number', 'LIKE', "%{$search}%")
+                         ->orWhere('guardian_mobile', 'LIKE', "%{$search}%") // 🔴 সার্চেও অভিভাবকের নাম্বার অ্যাড করা হলো
                          ->orWhere('id', $search)
                          ->orWhere('biodata_no', $search)
                          ->orWhereHas('user', function($u) use ($search) {
@@ -34,7 +36,18 @@ class AdminBiodataController extends Controller
             return $q->where('type', $request->type);
         });
 
-        $biodatas = $query->latest('updated_at')->paginate(10);
+        // সর্টিং লজিক
+        $sortBy = $request->sort_by ?? 'updated_at';
+        $sortDir = $request->sort_dir ?? 'desc';
+        $allowedSorts = ['id', 'biodata_no', 'updated_at'];
+
+        if (in_array($sortBy, $allowedSorts)) {
+            $query->orderBy($sortBy, $sortDir);
+        } else {
+            $query->latest('updated_at');
+        }
+
+        $biodatas = $query->paginate($request->per_page ?? 10);
 
         return response()->json([
             'success' => true,

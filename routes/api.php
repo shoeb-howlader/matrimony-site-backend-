@@ -29,6 +29,12 @@ use App\Http\Controllers\Admin\AdminPackageController;
 use App\Http\Controllers\Admin\AdminContactController;
 use App\Http\Controllers\Admin\AdminBiodataViewController;
 use App\Http\Controllers\Admin\AdminDashboardController;
+use App\Http\Controllers\Admin\AdminSettingsController;
+use App\Http\Controllers\UserDashboardController;
+use App\Http\Controllers\SocialiteController;
+use Illuminate\Support\Facades\Broadcast;
+
+Broadcast::routes(['middleware' => ['auth:sanctum']]);
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
@@ -92,6 +98,11 @@ Route::get('/locations/unions/{upazila_id}', function ($upazila_id) {
 });
 
 Route::get('/metadata', [SettingController::class, 'getMetadata']);
+
+// {provider} এর জায়গায় google বা facebook বসবে
+////
+////
+Route::post('/auth/{provider}/callback', [SocialiteController::class, 'handleProviderCallback']);
 
 /*
 |--------------------------------------------------------------------------
@@ -167,6 +178,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/notifications', [NotificationController::class, 'getAllNotifications']);
     Route::post('/notifications/{id}/read', [NotificationController::class, 'markAsRead']);
     Route::post('/notifications/read-all', [NotificationController::class, 'markAllAsRead']);
+
+    //dashboard stats
+    Route::get('/user/dashboard-stats', [App\Http\Controllers\UserDashboardController::class, 'getDashboardStats']);
+    Route::post('/user/favorites/note', [App\Http\Controllers\PreferenceController::class, 'saveNote']);
+    Route::post('/complete-profile', [App\Http\Controllers\AuthController::class, 'completeProfile']);
 
 });
 // পেমেন্ট গেটওয়ে থেকে রেসপন্স রিসিভ করার জন্য (এটি পাবলিক হবে, তবে পেমেন্ট গেটওয়ের সিগনেচার ভেরিফাই করতে হবে)
@@ -285,5 +301,16 @@ Route::post('/biodata/{id}/restore', [App\Http\Controllers\Admin\AdminBiodataCon
 // 🔴 ইউজার রেস্ট্রিক্ট এবং রিমুভ রেস্ট্রিকশন রাউট
 Route::post('/user/{id}/restrict', [AdminUserController::class, 'restrictUser']);
 Route::post('/user/{id}/remove-restriction', [AdminUserController::class, 'removeRestriction']);
+
+// Profile & Password Settings
+    Route::post('/profile/update', [App\Http\Controllers\Admin\AdminSettingsController::class, 'updateProfile']);
+    Route::post('/password/update', [App\Http\Controllers\Admin\AdminSettingsController::class, 'updatePassword']);
+
+    // Notifications
+    Route::get('/notifications', [App\Http\Controllers\Admin\AdminSettingsController::class, 'getNotifications']);
+    Route::post('/notifications/{id}/read', [App\Http\Controllers\Admin\AdminSettingsController::class, 'markAsRead']);
+    Route::post('/notifications/read-all', [App\Http\Controllers\Admin\AdminSettingsController::class, 'markAllAsRead']);
+    Route::get('/notifications/all', [App\Http\Controllers\Admin\AdminSettingsController::class, 'getAllNotifications']);
+    Route::delete('/notifications/{id}', [App\Http\Controllers\Admin\AdminSettingsController::class, 'deleteNotification']);
 
 });

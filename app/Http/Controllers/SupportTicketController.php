@@ -9,6 +9,9 @@ use App\Models\PurchasedBiodata;
 use App\Models\HasFactory;
 use App\Models\Biodata;
 use App\Models\User;
+use Illuminate\Support\Facades\Notification;
+use App\Notifications\AdminAlertNotification;
+use Illuminate\Support\Facades\Storage;
 
 class SupportTicketController extends Controller
 {
@@ -38,7 +41,7 @@ class SupportTicketController extends Controller
     }
 
     // ২. নতুন টিকিট তৈরি করার জন্য (POST Request)
-   public function store(Request $request)
+public function store(Request $request)
     {
         // ১. ডাটা ভ্যালিডেশন
         $request->validate([
@@ -54,7 +57,7 @@ class SupportTicketController extends Controller
         // 🔴 ২. যদি এটি "বায়োডাটা রিপোর্ট" হয়, তবে আপনার আগের সিকিউরিটি চেকগুলো রান করবে 🔴
         if ($request->category === 'biodata_report' && $request->biodata_no) {
 
-            $biodata = Biodata::where('biodata_no', $request->biodata_no)->first();
+            $biodata = \App\Models\Biodata::where('biodata_no', $request->biodata_no)->first();
 
             if (!$biodata) {
                 return response()->json(['success' => false, 'message' => 'বায়োডাটা খুঁজে পাওয়া যায়নি।'], 404);
@@ -66,7 +69,7 @@ class SupportTicketController extends Controller
             }
 
             // খ. পারচেজ চেক (কিনেছে কিনা)
-            $hasPurchased = PurchasedBiodata::where('user_id', $user->id)
+            $hasPurchased = \App\Models\PurchasedBiodata::where('user_id', $user->id)
                                             ->where('biodata_id', $biodata->id)
                                             ->exists();
 
@@ -75,7 +78,7 @@ class SupportTicketController extends Controller
             }
 
             // গ. স্প্যামিং চেক (আগে পেন্ডিং আছে কিনা)
-            $alreadyReported = SupportTicket::where('user_id', $user->id)
+            $alreadyReported = \App\Models\SupportTicket::where('user_id', $user->id)
                                             ->where('biodata_no', $request->biodata_no)
                                             ->where('category', 'biodata_report')
                                             ->where('status', 'pending')
@@ -93,15 +96,48 @@ class SupportTicketController extends Controller
         }
 
         // ৪. ডাটাবেজে সেভ করা (Unified Table)
-        SupportTicket::create([
+        $ticket = \App\Models\SupportTicket::create([
             'user_id' => $user->id,
             'category' => $request->category,
             'biodata_no' => $request->biodata_no,
-            'subject' => $request->subject, // report.vue এর reason এখানে subject হিসেবে সেভ হবে
-            'message' => $request->message, // report.vue এর description এখানে message হিসেবে সেভ হবে
+            'subject' => $request->subject,
+            'message' => $request->message,
             'attachment' => $attachmentPath,
             'status' => 'pending',
         ]);
+
+        // 🔴 ৫. অ্যাডমিনকে নোটিফিকেশন পাঠানো 🔴
+        try {
+            $admins = \App\Models\User::where('role', 'admin')->get();
+
+            if ($request->category === 'biodata_report') {
+                $title = 'নতুন রিপোর্ট জমা পড়েছে!';
+                $message = "বায়োডাটা নং {$request->biodata_no} এর বিরুদ্ধে একটি রিপোর্ট করা হয়েছে।";
+            } else {
+                $title = 'নতুন সাপোর্ট টিকিট!';
+                $message = "নতুন একটি সাপোর্ট টিকিট ওপেন হয়েছে। বিষয়: {$request->subject}";
+            }
+
+            \Illuminate\Support\Facades\Notification::send($admins, new \App\Notifications\AdminAlertNotification($title, $message, '/admin/support-tickets'));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Admin Notification Error (Support Ticket): ' . $e->getMessage());
+        }
+
+        // 🔴 ৬. ইউজারকে নোটিফিকেশন পাঠানো 🔴
+        try {
+            if ($request->category === 'biodata_report') {
+                $userTitle = 'রিপোর্ট সফলভাবে জমা হয়েছে!';
+                $userMessage = "বায়োডাটা নং {$request->biodata_no} এর বিরুদ্ধে আপনার অভিযোগটি আমাদের কাছে পৌঁছেছে। আমরা দ্রুত এটি রিভিউ করবো।";
+            } else {
+                $userTitle = 'সাপোর্ট টিকিট তৈরি হয়েছে!';
+                $userMessage = "আপনার সাপোর্ট টিকিটটি (বিষয়: {$request->subject}) সফলভাবে তৈরি হয়েছে। অ্যাডমিন শীঘ্রই আপনার সাথে যোগাযোগ করবেন।";
+            }
+
+            // ইউজারের সাপোর্ট টিকিট পেজের লিংক দিতে পারেন (আপনার ফ্রন্টএন্ড অনুযায়ী URL পরিবর্তন করে নেবেন)
+            $user->notify(new \App\Notifications\UserAlertNotification($userTitle, $userMessage, '/user/support-tickets'));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('User Notification Error (Support Ticket): ' . $e->getMessage());
+        }
 
         return response()->json([
             'success' => true,

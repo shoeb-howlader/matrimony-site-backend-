@@ -18,7 +18,7 @@ use App\Models\SupportTicket;
 use App\Models\LoginHistory;
 use App\Models\UserRestrictionLog;
 
-#[Fillable(['name', 'email', 'password', 'total_connections', 'role', 'restriction_expires_at', 'restriction_reason'])]
+#[Fillable(['name', 'email', 'password', 'total_connections', 'role', 'restriction_expires_at', 'restriction_reason','mobile','google_id','avatar','gender'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {

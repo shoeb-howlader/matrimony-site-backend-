@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use App\Models\User;
 use App\Models\Transation;
+use App\Events\NotificationSent;
 
 
 class PaymentController extends Controller
@@ -140,51 +141,126 @@ class PaymentController extends Controller
         return response()->json(['message' => 'Invalid status']);
     }
 
-    // ইউজারকে রিডাইরেক্ট করার পর দেখানোর জন্য (Success Page)
-   public function success(Request $request)
-{
-    // ১. SSLCommerz থেকে আসা ডাটা লগে সেভ করা
-    \Illuminate\Support\Facades\Log::info('SSLCommerz Payload:', $request->all());
 
-    $transactionId = $request->input('tran_id');
-    $status = $request->input('status');
+// ইউজারকে রিডাইরেক্ট করার পর দেখানোর জন্য (Success Page)
+    public function success(Request $request)
+    {
+        // ১. SSLCommerz থেকে আসা ডাটা লগে সেভ করা
+        \Illuminate\Support\Facades\Log::info('SSLCommerz Payload:', $request->all());
 
-    $transaction = \App\Models\Transaction::where('transaction_id', $transactionId)->first();
+        $transactionId = $request->input('tran_id');
+        $status = $request->input('status');
 
-    if (!$transaction) {
-        \Illuminate\Support\Facades\Log::error('Transaction not found in DB: ' . $transactionId);
-        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/user/purchases?payment=failed');
+        $transaction = \App\Models\Transaction::where('transaction_id', $transactionId)->first();
+
+        if (!$transaction) {
+            \Illuminate\Support\Facades\Log::error('Transaction not found in DB: ' . $transactionId);
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/user/purchases?payment=failed');
+        }
+
+        // পেমেন্ট মেথড ক্লিন করার লজিক (BKASH-bKash থেকে bKash করা)
+        $cardType = $request->input('card_type', 'sslcommerz');
+        if (str_contains($cardType, '-')) {
+            $paymentMethod = explode('-', $cardType)[1];
+        } else {
+            $paymentMethod = $cardType;
+        }
+
+        try {
+            \Illuminate\Support\Facades\DB::transaction(function () use ($transaction, $paymentMethod) {
+                // ১. ট্রানজেকশন স্ট্যাটাস আপডেট
+                $transaction->update([
+                    'status' => 'success',
+                    'payment_method' => $paymentMethod
+                ]);
+
+                // ২. ইউজারের কানেকশন বাড়ানো
+                \App\Models\User::where('id', $transaction->user_id)
+                    ->increment('total_connections', $transaction->connections_added);
+            });
+
+            // 🔴 ৩. অ্যাডমিনদের নোটিফিকেশন পাঠানো এবং Reverb ইভেন্ট ফায়ার করা 🔴
+            try {
+                $admins = \App\Models\User::where('role', 'admin')->get();
+                $amount = $transaction->amount;
+
+                // ইমেইলের বদলে ইউজারের নাম নেওয়া হলো
+                $userName = $transaction->user->name ?? 'একজন ইউজার';
+
+                $adminNotificationData = [
+                    'title' => 'নতুন পেমেন্ট গ্রহণ করা হয়েছে!',
+                    // মেসেজে ইউজারের নাম ব্যবহার করা হলো
+                    'message' => "{$userName} সফলভাবে ৳{$amount} টাকার একটি প্যাকেজ কিনেছেন। ট্রানজেকশন আইডি: {$transactionId}",
+                    'link' => '/admin/payments'
+                ];
+
+                // ডাটাবেজে নোটিফিকেশন সেভ করা
+                \Illuminate\Support\Facades\Notification::send($admins, new \App\Notifications\AdminAlertNotification(
+                    $adminNotificationData['title'],
+                    $adminNotificationData['message'],
+                    $adminNotificationData['link']
+                ));
+
+                // Reverb এর মাধ্যমে রিয়েল-টাইমে প্রত্যেক এডমিনকে পুশ করা
+                foreach ($admins as $admin) {
+                    // ফ্রন্টএন্ডের জন্য নোটিফিকেশনের স্ট্রাকচার তৈরি করা
+                    $notificationObj = [
+                        'id' => \Illuminate\Support\Str::uuid()->toString(),
+                        'type' => 'App\\Notifications\\AdminAlertNotification',
+                        'notifiable_type' => 'App\\Models\\User',
+                        'notifiable_id' => $admin->id,
+                        'data' => $adminNotificationData,
+                        'read_at' => null,
+                        'created_at' => now()->toISOString(),
+                        'updated_at' => now()->toISOString(),
+                    ];
+                    event(new \App\Events\NotificationSent($admin, $notificationObj));
+                }
+
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Admin Notification Error (Payment): ' . $e->getMessage());
+            }
+
+            // 🔴 ৪. ইউজারকে নোটিফিকেশন পাঠানো এবং Reverb ইভেন্ট ফায়ার করা 🔴
+            try {
+                if ($transaction->user) {
+                    $userNotificationData = [
+                        'title' => 'পেমেন্ট সফল হয়েছে!',
+                        'message' => "আপনার ৳{$transaction->amount} টাকার পেমেন্টটি সফল হয়েছে এবং আপনার অ্যাকাউন্টে {$transaction->connections_added} টি কানেকশন যুক্ত করা হয়েছে।",
+                        'link' => '/user/purchases'
+                    ];
+
+                    // ডাটাবেজে নোটিফিকেশন সেভ করা
+                    $transaction->user->notify(new \App\Notifications\UserAlertNotification(
+                        $userNotificationData['title'],
+                        $userNotificationData['message'],
+                        $userNotificationData['link']
+                    ));
+
+                    // Reverb এর মাধ্যমে রিয়েল-টাইমে ইউজারকে পুশ করা
+                    $notificationObj = [
+                        'id' => \Illuminate\Support\Str::uuid()->toString(),
+                        'type' => 'App\\Notifications\\UserAlertNotification',
+                        'notifiable_type' => 'App\\Models\\User',
+                        'notifiable_id' => $transaction->user->id,
+                        'data' => $userNotificationData,
+                        'read_at' => null,
+                        'created_at' => now()->toISOString(),
+                        'updated_at' => now()->toISOString(),
+                    ];
+                    event(new \App\Events\NotificationSent($transaction->user, $notificationObj));
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('User Notification Error (Payment): ' . $e->getMessage());
+            }
+
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/user/purchases?payment=success');
+
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('DB Update Error: ' . $e->getMessage());
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/user/purchases?payment=failed');
+        }
     }
-
-    // 🔴 পেমেন্ট মেথড ক্লিন করার লজিক (BKASH-bKash থেকে bKash করা)
-    $cardType = $request->input('card_type', 'sslcommerz');
-    if (str_contains($cardType, '-')) {
-        // হাইফেন থাকলে পরের অংশটি নিবে (যেমন: bKash)
-        $paymentMethod = explode('-', $cardType)[1];
-    } else {
-        $paymentMethod = $cardType;
-    }
-
-    try {
-        \Illuminate\Support\Facades\DB::transaction(function () use ($transaction, $paymentMethod) {
-            // ১. ট্রানজেকশন স্ট্যাটাস আপডেট
-            $transaction->update([
-                'status' => 'success',
-                'payment_method' => $paymentMethod // এখন ক্লিন নাম সেভ হবে
-            ]);
-
-            // ২. ইউজারের কানেকশন বাড়ানো
-            \App\Models\User::where('id', $transaction->user_id)
-                ->increment('total_connections', $transaction->connections_added);
-        });
-
-        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/user/purchases?payment=success');
-
-    } catch (\Exception $e) {
-        \Illuminate\Support\Facades\Log::error('DB Update Error: ' . $e->getMessage());
-        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/user/purchases?payment=failed');
-    }
-}
 
 /**
  * ইউজারের পেমেন্ট এবং কানেকশন খরচের ইতিহাস (ক্রয়সমূহ)

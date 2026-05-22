@@ -22,19 +22,25 @@ class NotificationSent implements ShouldBroadcast
         $this->notification = $notification;
     }
 
-    public function broadcastOn(): array
+  public function broadcastOn(): array
     {
-        // 🔴 যদি ইউজারের রোল admin হয়, তবে সে অ্যাডমিন চ্যানেলে লিসেন করবে
-        if ($this->user->role === 'admin') {
-            return [
-                new PrivateChannel('admin-notifications'),
-            ];
-        }
-
-        // সাধারণ ইউজারের জন্য তার নিজের আইডি চ্যানেল
-        return [
+        $channels = [
+            // 🔴 ফিক্স: ইউজারের রোল যাই হোক না কেন (User, Moderator, Admin, Super Admin),
+            // তাকে তার পার্সোনাল চ্যানেলে সিগন্যাল পাঠাতেই হবে।
             new PrivateChannel('App.Models.User.' . $this->user->id),
         ];
+
+        // যদি স্পেশাল কোনো কারণে অ্যাডমিনদের গ্লোবাল চ্যানেলেও ব্রডকাস্ট করতে চান,
+        // তবে নিচের কোডটি আনকমেন্ট করতে পারেন। কিন্তু পার্সোনাল নোটিফিকেশনের ক্ষেত্রে
+        // এটি না রাখাই ভালো, নইলে একজনের রোল চেঞ্জ হলে অন্য অ্যাডমিনরাও নোটিফিকেশন পেয়ে যাবে।
+
+        /*
+        if (in_array($this->user->role, ['super_admin', 'admin', 'moderator'])) {
+            $channels[] = new PrivateChannel('admin-notifications');
+        }
+        */
+
+        return $channels;
     }
 
     public function broadcastAs(): string

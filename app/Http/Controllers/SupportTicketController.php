@@ -12,6 +12,8 @@ use App\Models\User;
 use Illuminate\Support\Facades\Notification;
 use App\Notifications\AdminAlertNotification;
 use Illuminate\Support\Facades\Storage;
+use App\Events\NotificationSent;
+use Illuminate\Support\Str;
 
 class SupportTicketController extends Controller
 {
@@ -40,8 +42,8 @@ class SupportTicketController extends Controller
         return response()->json(['success' => true, 'data' => $tickets]);
     }
 
-    // ২. নতুন টিকিট তৈরি করার জন্য (POST Request)
-public function store(Request $request)
+// ২. নতুন টিকিট তৈরি করার জন্য (POST Request)
+    public function store(Request $request)
     {
         // ১. ডাটা ভ্যালিডেশন
         $request->validate([
@@ -70,8 +72,8 @@ public function store(Request $request)
 
             // খ. পারচেজ চেক (কিনেছে কিনা)
             $hasPurchased = \App\Models\PurchasedBiodata::where('user_id', $user->id)
-                                            ->where('biodata_id', $biodata->id)
-                                            ->exists();
+                                                        ->where('biodata_id', $biodata->id)
+                                                        ->exists();
 
             if (!$hasPurchased) {
                 return response()->json(['success' => false, 'message' => 'আপনি এই বায়োডাটার যোগাযোগের তথ্য আনলক করেননি, তাই অভিযোগ করতে পারবেন না।'], 403);
@@ -79,10 +81,10 @@ public function store(Request $request)
 
             // গ. স্প্যামিং চেক (আগে পেন্ডিং আছে কিনা)
             $alreadyReported = \App\Models\SupportTicket::where('user_id', $user->id)
-                                            ->where('biodata_no', $request->biodata_no)
-                                            ->where('category', 'biodata_report')
-                                            ->where('status', 'pending')
-                                            ->exists();
+                                                        ->where('biodata_no', $request->biodata_no)
+                                                        ->where('category', 'biodata_report')
+                                                        ->where('status', 'pending')
+                                                        ->exists();
 
             if ($alreadyReported) {
                 return response()->json(['success' => false, 'message' => 'আপনি ইতিমধ্যে এই বায়োডাটার বিরুদ্ধে একটি অভিযোগ করেছেন, যা এখনো রিভিউয়ের অপেক্ষায় আছে।'], 422);
@@ -106,7 +108,7 @@ public function store(Request $request)
             'status' => 'pending',
         ]);
 
-        // 🔴 ৫. অ্যাডমিনকে নোটিফিকেশন পাঠানো 🔴
+        // 🔴 ৫. অ্যাডমিনকে নোটিফিকেশন পাঠানো (ডাটাবেস + রিয়েল-টাইম) 🔴
         try {
             $admins = \App\Models\User::where('role', 'admin')->get();
 
@@ -118,12 +120,34 @@ public function store(Request $request)
                 $message = "নতুন একটি সাপোর্ট টিকিট ওপেন হয়েছে। বিষয়: {$request->subject}";
             }
 
-            \Illuminate\Support\Facades\Notification::send($admins, new \App\Notifications\AdminAlertNotification($title, $message, '/admin/support-tickets'));
+            $adminLink = '/admin/support-tickets';
+
+            // ডাটাবেস নোটিফিকেশন
+            \Illuminate\Support\Facades\Notification::send($admins, new \App\Notifications\AdminAlertNotification($title, $message, $adminLink));
+
+            // Reverb রিয়েল-টাইম নোটিফিকেশন
+            foreach ($admins as $admin) {
+                $notificationObj = [
+                    'id' => \Illuminate\Support\Str::uuid()->toString(),
+                    'type' => 'App\\Notifications\\AdminAlertNotification',
+                    'notifiable_type' => 'App\\Models\\User',
+                    'notifiable_id' => $admin->id,
+                    'data' => [
+                        'title' => $title,
+                        'message' => $message,
+                        'link' => $adminLink
+                    ],
+                    'read_at' => null,
+                    'created_at' => now()->toISOString(),
+                    'updated_at' => now()->toISOString(),
+                ];
+                event(new \App\Events\NotificationSent($admin, $notificationObj));
+            }
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Admin Notification Error (Support Ticket): ' . $e->getMessage());
         }
 
-        // 🔴 ৬. ইউজারকে নোটিফিকেশন পাঠানো 🔴
+        // 🔴 ৬. ইউজারকে নোটিফিকেশন পাঠানো (ডাটাবেস + রিয়েল-টাইম) 🔴
         try {
             if ($request->category === 'biodata_report') {
                 $userTitle = 'রিপোর্ট সফলভাবে জমা হয়েছে!';
@@ -133,8 +157,28 @@ public function store(Request $request)
                 $userMessage = "আপনার সাপোর্ট টিকিটটি (বিষয়: {$request->subject}) সফলভাবে তৈরি হয়েছে। অ্যাডমিন শীঘ্রই আপনার সাথে যোগাযোগ করবেন।";
             }
 
-            // ইউজারের সাপোর্ট টিকিট পেজের লিংক দিতে পারেন (আপনার ফ্রন্টএন্ড অনুযায়ী URL পরিবর্তন করে নেবেন)
-            $user->notify(new \App\Notifications\UserAlertNotification($userTitle, $userMessage, '/user/support-tickets'));
+            $userLink = '/user/support'; // আপনার ফ্রন্টএন্ডের লিংকের উপর ভিত্তি করে পরিবর্তন করতে পারেন
+
+            // ডাটাবেস নোটিফিকেশন
+            $user->notify(new \App\Notifications\UserAlertNotification($userTitle, $userMessage, $userLink));
+
+            // Reverb রিয়েল-টাইম নোটিফিকেশন
+            $notificationObj = [
+                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                'type' => 'App\\Notifications\\UserAlertNotification',
+                'notifiable_type' => 'App\\Models\\User',
+                'notifiable_id' => $user->id,
+                'data' => [
+                    'title' => $userTitle,
+                    'message' => $userMessage,
+                    'link' => $userLink
+                ],
+                'read_at' => null,
+                'created_at' => now()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ];
+            event(new \App\Events\NotificationSent($user, $notificationObj));
+
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('User Notification Error (Support Ticket): ' . $e->getMessage());
         }

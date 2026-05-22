@@ -7,6 +7,9 @@ use Illuminate\Http\Request;
 use App\Models\User;
 use App\Notifications\UserAlertNotification;
 use App\Models\UserRestrictionLog;
+use App\Events\NotificationSent;
+use Illuminate\Support\Str;
+use App\Jobs\SendGlobalNotificationJob;
 
 class AdminUserController extends Controller
 {
@@ -92,8 +95,48 @@ class AdminUserController extends Controller
         return response()->json(['success' => true, 'data' => $users, 'total' => $users->total()]);
     }
 
-    public function changeStatus(Request $request, $id) {
-        $user = User::findOrFail($id); $user->status = $request->status; $user->save();
+   public function changeStatus(Request $request, $id)
+    {
+        // 🔴 ইউজারের সাথে তার বায়োডাটাও লোড করে নেওয়া হলো
+        $user = User::with('biodata')->findOrFail($id);
+
+        $newStatus = $request->status;
+        $user->status = $newStatus;
+        $user->save();
+
+        // ── 🔴 যদি ইউজারকে ব্যান করা হয় ──
+        if ($newStatus === 'banned') {
+
+            // ১. ইউজারের বায়োডাটা থাকলে তা সাথে সাথে হাইড (লুকিয়ে) ফেলা
+            if ($user->biodata) {
+                $user->biodata->is_hidden = 1;
+                $user->biodata->save();
+            }
+
+            // ২. ইউজারের সমস্ত লগইন সেশন (টোকেন) ডিলিট করে দেওয়া
+            $user->tokens()->delete();
+
+            // ৩. Reverb-এর মাধ্যমে ফ্রন্টএন্ডে রিয়েল-টাইম 'Kickout' সিগন্যাল পাঠানো
+            try {
+                $notificationObj = [
+                    'id' => \Illuminate\Support\Str::uuid()->toString(),
+                    'type' => 'BANNED_KICKOUT', // স্পেশাল টাইপ যা ফ্রন্টএন্ড ধরবে
+                    'notifiable_type' => 'App\\Models\\User',
+                    'notifiable_id' => $user->id,
+                    'data' => [
+                        'message' => 'আপনার অ্যাকাউন্টটি স্থায়ীভাবে ব্যান করা হয়েছে।'
+                    ],
+                    'read_at' => null,
+                    'created_at' => now()->toISOString(),
+                    'updated_at' => now()->toISOString(),
+                ];
+
+                event(new \App\Events\NotificationSent($user, $notificationObj));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Ban Kickout Error: ' . $e->getMessage());
+            }
+        }
+
         return response()->json(['success' => true]);
     }
 
@@ -412,7 +455,7 @@ class AdminUserController extends Controller
         return response()->json(['success' => true, 'data' => $data, 'total' => $data->total()]);
     }
 
-    // ─── অ্যাডমিন প্যানেল থেকে ইউজারের বায়োডাটা লাইভ/হাইড করা ───
+// ─── অ্যাডমিন প্যানেল থেকে ইউজারের বায়োডাটা লাইভ/হাইড করা ───
     public function toggleUserBiodataVisibility($id)
     {
         $user = User::with(['biodata' => fn($q) => $q->withTrashed()])->findOrFail($id);
@@ -421,10 +464,46 @@ class AdminUserController extends Controller
             return response()->json(['success' => false, 'message' => 'বায়োডাটা পাওয়া যায়নি!']);
         }
 
+        // স্ট্যাটাস টগল করা
         $user->biodata->is_hidden = !$user->biodata->is_hidden;
         $user->biodata->save();
 
         $statusText = $user->biodata->is_hidden ? 'হাইড' : 'লাইভ';
+        $messageText = $user->biodata->is_hidden
+            ? 'আপনার বায়োডাটা অ্যাডমিন কর্তৃক হাইড (লুকায়িত) করা হয়েছে।'
+            : 'আপনার বায়োডাটা অ্যাডমিন কর্তৃক পুনরায় লাইভ (পাবলিক) করা হয়েছে।';
+
+        // 📩 ১. ইউজারকে ডাটাবেস নোটিফিকেশন পাঠানো
+        $user->notify(new \App\Notifications\UserAlertNotification(
+            "বায়োডাটা {$statusText}",
+            $messageText,
+            '/user/dashboard'
+        ));
+
+        // 🔴 ২. Reverb রিয়েল-টাইম ইভেন্ট ফায়ার করা
+        try {
+            $notificationData = [
+                'title' => "বায়োডাটা {$statusText}",
+                'message' => $messageText,
+                'link' => '/user/dashboard'
+            ];
+
+            $notificationObj = [
+                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                'type' => 'App\\Notifications\\UserAlertNotification',
+                'notifiable_type' => 'App\\Models\\User',
+                'notifiable_id' => $user->id,
+                'data' => $notificationData,
+                'read_at' => null,
+                'created_at' => now()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ];
+
+            event(new \App\Events\NotificationSent($user, $notificationObj));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Visibility Toggle Realtime Notification Error: ' . $e->getMessage());
+        }
+
         return response()->json([
             'success' => true,
             'message' => "বায়োডাটা সফলভাবে {$statusText} করা হয়েছে!",
@@ -592,16 +671,16 @@ public function getAllDeletionLogs(Request $request)
 
     public function exportUsers(Request $request) { /* Your existing export logic */ }
 
-// ─── 🔴 ১. ইউজারকে রেস্ট্রিক্ট করার ফাংশন (হিস্ট্রি সেভ সহ) ───
+// ─── 🔴 ১. ইউজারকে রেস্ট্রিক্ট করার ফাংশন (বায়োডাটা হাইড লজিক সহ) ───
     public function restrictUser(Request $request, $id) {
         $request->validate([
             'days' => 'required|integer',
             'reason' => 'nullable|string|max:1000'
         ]);
 
-        $user = User::findOrFail($id);
+        // 🔴 ইউজারের সাথে তার বায়োডাটাও লোড করা হলো
+        $user = User::with('biodata')->findOrFail($id);
 
-        // 🔴 সমাধান: (int) দিয়ে ভ্যালুটিকে স্ট্রিং থেকে নাম্বারে কনভার্ট করা হয়েছে
         $days = (int) $request->days;
         $expiresAt = now()->addDays($days);
 
@@ -610,25 +689,58 @@ public function getAllDeletionLogs(Request $request)
         $user->restriction_reason = $request->reason;
         $user->save();
 
+        // 🔴 ৩. ইউজারের যদি বায়োডাটা থাকে, তবে সেটি সাথে সাথে হাইড করে দেওয়া হলো
+        if ($user->biodata) {
+            $user->biodata->is_hidden = 1;
+            $user->biodata->save();
+        }
+
         // রেস্ট্রিকশন হিস্ট্রি (Log) ডাটাবেসে সেভ করা হচ্ছে
         \App\Models\UserRestrictionLog::create([
             'user_id'         => $user->id,
-            'restricted_days' => $days, // 👈 এখানেও $days ভেরিয়েবল ব্যবহার করা হলো
+            'restricted_days' => $days,
             'reason'          => $request->reason ?? 'কোনো কারণ উল্লেখ করা হয়নি',
             'expires_at'      => $expiresAt,
         ]);
 
-        // ইউজারকে নোটিফিকেশন পাঠানো
+        $reasonText = $request->reason ?? 'কমিউনিটি গাইডলাইন ভঙ্গ';
+
+        // 📩 ১. ডাটাবেস নোটিফিকেশন পাঠানো
         $user->notify(new \App\Notifications\UserAlertNotification(
             'অ্যাকাউন্ট রেস্ট্রিক্টেড!',
-            "আপনার অ্যাকাউন্ট সাময়িকভাবে রেস্ট্রিক্ট করা হয়েছে। কারণ: " . ($request->reason ?? 'কমিউনিটি গাইডলাইন ভঙ্গ'),
+            "আপনার অ্যাকাউন্ট সাময়িকভাবে রেস্ট্রিক্ট করা হয়েছে। কারণ: {$reasonText}",
             '/user/dashboard'
         ));
 
-        return response()->json(['success' => true, 'message' => 'ইউজারকে সফলভাবে রেস্ট্রিক্ট করা হয়েছে।']);
+        // 🔴 ২. রিয়েল-টাইম নোটিফিকেশন (Reverb) ফায়ার করা
+        try {
+            $notificationData = [
+                'title' => 'অ্যাকাউন্ট রেস্ট্রিক্টেড!',
+                'message' => "আপনার অ্যাকাউন্ট সাময়িকভাবে রেস্ট্রিক্ট করা হয়েছে। কারণ: {$reasonText}",
+                'link' => '/user/dashboard'
+            ];
+
+            $notificationObj = [
+                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                'type' => 'App\\Notifications\\UserAlertNotification',
+                'notifiable_type' => 'App\\Models\\User',
+                'notifiable_id' => $user->id,
+                'data' => $notificationData,
+                'read_at' => null,
+                'created_at' => now()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ];
+
+            event(new \App\Events\NotificationSent($user, $notificationObj));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Restriction Realtime Notification Error: ' . $e->getMessage());
+        }
+
+        return response()->json(['success' => true, 'message' => 'ইউজারকে সফলভাবে রেস্ট্রিক্ট করা হয়েছে এবং তার বায়োডাটা হাইড করা হয়েছে।']);
     }
 
- // ─── 🔴 ২. রেস্ট্রিকশন ম্যানুয়ালি তুলে নেওয়ার ফাংশন ───
+
+   // ─── 🔴 ২. রেস্ট্রিকশন ম্যানুয়ালি তুলে নেওয়ার ফাংশন (রিয়েল-টাইম নোটিফিকেশন সহ) ───
     public function removeRestriction($id)
     {
         $user = User::findOrFail($id);
@@ -638,20 +750,197 @@ public function getAllDeletionLogs(Request $request)
         $user->restriction_reason = null;
         $user->save();
 
-        // 🔴 নতুন আপডেট: লগ (History) টেবিলেও বর্তমান মেয়াদ শেষ করে দেওয়া হচ্ছে
+        // লগ (History) টেবিলেও বর্তমান মেয়াদ শেষ করে দেওয়া হচ্ছে
         $latestLog = \App\Models\UserRestrictionLog::where('user_id', $user->id)->latest()->first();
         if ($latestLog) {
             $latestLog->expires_at = now(); // মেয়াদ ম্যানুয়ালি আজকে শেষ করে দেওয়া হলো
             $latestLog->save();
         }
 
-        // 📩 ইউজারকে নোটিফিকেশন পাঠানো
+        $notificationData = [
+            'title' => 'অ্যাকাউন্ট রেস্ট্রিকশন বাতিল',
+            'message' => 'আপনার অ্যাকাউন্টের ওপর থাকা রেস্ট্রিকশন অ্যাডমিন কর্তৃক তুলে নেওয়া হয়েছে। আপনি এখন আপনার অ্যাকাউন্টটি স্বাভাবিকভাবে ব্যবহার করতে পারবেন।',
+            'link' => '/user/dashboard'
+        ];
+
+        // 📩 ১. ডাটাবেস নোটিফিকেশন পাঠানো
         $user->notify(new \App\Notifications\UserAlertNotification(
-            'অ্যাকাউন্ট রেস্ট্রিকশন বাতিল',
-            'আপনার অ্যাকাউন্টের ওপর থাকা রেস্ট্রিকশন অ্যাডমিন কর্তৃক তুলে নেওয়া হয়েছে। আপনি এখন নতুন বায়োডাটা তৈরি করতে পারবেন।',
-            '/user/dashboard'
+            $notificationData['title'],
+            $notificationData['message'],
+            $notificationData['link']
         ));
 
+        // 🔴 ২. রিয়েল-টাইম নোটিফিকেশন (Reverb) ফায়ার করা 🔴
+        try {
+            $notificationObj = [
+                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                'type' => 'App\\Notifications\\UserAlertNotification',
+                'notifiable_type' => 'App\\Models\\User',
+                'notifiable_id' => $user->id,
+                'data' => $notificationData,
+                'read_at' => null,
+                'created_at' => now()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ];
+
+            event(new \App\Events\NotificationSent($user, $notificationObj));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Remove Restriction Realtime Notification Error: ' . $e->getMessage());
+        }
+
         return response()->json(['success' => true, 'message' => 'অ্যাকাউন্টের রেস্ট্রিকশন তুলে নেওয়া হয়েছে এবং নোটিফিকেশন পাঠানো হয়েছে!']);
+    }
+
+    public function sendGlobalNotification(Request $request)
+    {
+        // ডাটা ভ্যালিডেশন
+        $request->validate([
+            'title' => 'required|string|max:255',
+            'message' => 'required|string',
+            'link' => 'nullable|string'
+        ]);
+
+        $title = $request->title;
+        $message = $request->message;
+        $link = $request->link ?? '/user/dashboard';
+
+        // 🔴 Job টি Queue-তে পাঠিয়ে দেওয়া হলো (সার্ভার সাথে সাথে রেসপন্স দিয়ে দেবে)
+        SendGlobalNotificationJob::dispatch($title, $message, $link);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'সকল ইউজারকে নোটিফিকেশন পাঠানোর প্রক্রিয়া শুরু হয়েছে!'
+        ]);
+    }
+
+    // ১. শুধুমাত্র অ্যাডমিন এবং মডারেটরদের লিস্ট
+   // ১. অ্যাডমিন এবং মডারেটরদের লিস্ট (সুপার অ্যাডমিন সহ)
+    public function getAdmins()
+    {
+        $admins = User::whereIn('role', ['super_admin', 'admin', 'moderator'])
+            ->orderBy('role', 'desc') // সুপার অ্যাডমিনকে সবার উপরে দেখানোর জন্য
+            ->get();
+
+        return response()->json(['success' => true, 'data' => $admins]);
+    }
+
+    // ২. রোল আপডেট (ইউজারকে অ্যাডমিন বানানো বা অ্যাডমিন রিমুভ করা)
+  public function updateUserRole(Request $request, $id)
+    {
+        $request->validate([
+            'role' => 'required|in:user,admin,moderator'
+        ]);
+
+        $targetUser = User::findOrFail($id);
+        $currentUser = auth()->user();
+
+        // 🔴 সিকিউরিটি ১: কেউ সুপার অ্যাডমিনকে এডিট করতে পারবে না
+        if ($targetUser->role === 'super_admin') {
+            return response()->json(['success' => false, 'message' => 'সুপার অ্যাডমিনের রোল পরিবর্তন করা সম্ভব নয়!'], 403);
+        }
+
+        // 🔴 সিকিউরিটি ২: শুধুমাত্র সুপার অ্যাডমিনই নতুন কাউকে 'admin' বানাতে পারবে
+        if ($request->role === 'admin' && $currentUser->role !== 'super_admin') {
+            return response()->json(['success' => false, 'message' => 'অ্যাডমিন তৈরি করার ক্ষমতা শুধুমাত্র সুপার অ্যাডমিনের আছে!'], 403);
+        }
+
+        $oldRole = $targetUser->role;
+        $targetUser->role = $request->role;
+        $targetUser->save();
+
+        // ─── 🔴 সিকিউরিটি ৩: অফলাইন/অনলাইন কন্ট্রোল লজিক ───
+
+        // যদি কাউকে অ্যাডমিন প্যানেল থেকে বের করে সাধারণ ইউজার (user) বানানো হয়
+        if ($request->role === 'user' && in_array($oldRole, ['admin', 'moderator'])) {
+            // তার সব লগইন সেশন ডিলিট করে দিন (অফলাইন সিকিউরিটির জন্য)
+            $targetUser->tokens()->delete();
+            $actionType = 'ROLE_DEMOTED';
+            $message = 'আপনার অ্যাডমিন অ্যাক্সেস বাতিল করা হয়েছে। নিরাপত্তার স্বার্থে আপনাকে লগআউট করা হচ্ছে।';
+        } else {
+            // প্রমোশন পেলে বা এক অ্যাডমিন থেকে অন্য অ্যাডমিনে গেলে টোকেন ডিলিট করার দরকার নেই
+            $actionType = 'ROLE_UPDATED';
+            $message = "আপনার অ্যাকাউন্টের রোল পরিবর্তন করে '{$request->role}' করা হয়েছে।";
+        }
+
+        // ─── 🔴 ৪. Reverb রিয়েল-টাইম ইভেন্ট ফায়ার করা ───
+        try {
+            $notificationObj = [
+                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                'type' => $actionType, // ফ্রন্টএন্ড এই টাইপটি ধরে কাজ করবে
+                'notifiable_type' => 'App\\Models\\User',
+                'notifiable_id' => $targetUser->id,
+                'data' => [
+                    'message' => $message,
+                    'new_role' => $request->role
+                ],
+                'read_at' => null,
+                'created_at' => now()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ];
+
+            // আপনার তৈরি করা গ্লোবাল ইভেন্ট ব্যবহার করা হলো
+            event(new \App\Events\NotificationSent($targetUser, $notificationObj));
+
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Role Update Realtime Error: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => "রোল সফলভাবে '{$request->role}' এ পরিবর্তন করা হয়েছে।"
+        ]);
+    }
+
+    // ─── ২. সাধারণ ইউজারকে অ্যাডমিন/মডারেটর হিসেবে প্রমোশন দেওয়া ───
+   public function promoteUser(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email|exists:users,email',
+            'role' => 'required|in:admin,moderator'
+        ], [
+            'email.exists' => 'এই ইমেইল দিয়ে কোনো ইউজার সিস্টেমে নেই!'
+        ]);
+
+        $currentUser = auth()->user();
+
+        if ($request->role === 'admin' && $currentUser->role !== 'super_admin') {
+            return response()->json(['success' => false, 'message' => 'অ্যাডমিন তৈরি করার ক্ষমতা শুধুমাত্র সুপার অ্যাডমিনের আছে!'], 403);
+        }
+
+        $user = User::where('email', $request->email)->first();
+
+        if (in_array($user->role, ['admin', 'moderator', 'super_admin'])) {
+            return response()->json(['success' => false, 'message' => 'এই ইউজার ইতিমধ্যেই স্টাফ হিসেবে যুক্ত আছেন!'], 400);
+        }
+
+        // রোল আপডেট করা হলো
+        $user->role = $request->role;
+        $user->save();
+
+        // ─── 🔴 রিয়েল-টাইম ইভেন্ট ফায়ার করা (প্রমোশনের জন্য) ───
+        try {
+            $notificationObj = [
+                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                'type' => 'ROLE_PROMOTED', // নতুন টাইপ
+                'notifiable_type' => 'App\\Models\\User',
+                'notifiable_id' => $user->id,
+                'data' => [
+                    'message' => "আপনাকে সিস্টেমে '{$request->role}' হিসেবে প্রমোশন দেওয়া হয়েছে!",
+                    'new_role' => $request->role
+                ],
+                'read_at' => null,
+                'created_at' => now()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ];
+
+            event(new \App\Events\NotificationSent($user, $notificationObj));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Promotion Realtime Error: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => "{$user->name}-কে সফলভাবে {$request->role} হিসেবে যুক্ত করা হয়েছে!"
+        ]);
     }
 }

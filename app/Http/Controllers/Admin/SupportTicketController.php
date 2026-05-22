@@ -8,6 +8,8 @@ use App\Models\SupportTicket;
 use Illuminate\Support\Facades\Storage;
 use App\Models\User;
 use App\Models\Biodata;
+use App\Events\NotificationSent;
+use Illuminate\Support\Str;
 
 class SupportTicketController extends Controller
 {
@@ -93,7 +95,8 @@ class SupportTicketController extends Controller
         ]);
     }
 
-    // ── ৩. অ্যাডমিন রিপ্লাই দেওয়া এবং স্ট্যাটাস আপডেট করা ──
+
+  // ── ৩. অ্যাডমিন রিপ্লাই দেওয়া এবং স্ট্যাটাস আপডেট করা (রিয়েল-টাইম নোটিফিকেশন সহ) ──
     public function reply(Request $request, $id)
     {
         $request->validate([
@@ -110,7 +113,39 @@ class SupportTicketController extends Controller
 
         // ইউজারের কাছে নোটিফিকেশন পাঠানো
         if ($ticket->user) {
-            $ticket->user->notify(new \App\Notifications\TicketResolvedNotification($ticket));
+
+            $categoryText = $ticket->category === 'biodata_report' ? 'রিপোর্টের' : 'সাপোর্ট টিকিটের';
+
+            $notificationData = [
+                'title' => "আপনার {$categoryText} উত্তর এসেছে!",
+                'message' => "অ্যাডমিন আপনার {$categoryText} (Ticket #{$ticket->id}) একটি উত্তর দিয়েছেন। বিস্তারিত দেখতে এখানে ক্লিক করুন।",
+                'link' => '/user/support' // ইউজারের সাপোর্ট প্যানেলের লিংক
+            ];
+
+            // 🔴 ১. ফিক্সড: TicketResolvedNotification এর বদলে UserAlertNotification ব্যবহার করা হলো
+            $ticket->user->notify(new \App\Notifications\UserAlertNotification(
+                $notificationData['title'],
+                $notificationData['message'],
+                $notificationData['link']
+            ));
+
+            // 🔴 ২. রিয়েল-টাইম নোটিফিকেশন (Reverb) ফায়ার করা
+            try {
+                $notificationObj = [
+                    'id' => \Illuminate\Support\Str::uuid()->toString(),
+                    'type' => 'App\\Notifications\\UserAlertNotification', // 🔴 এখানেও টাইপ চেঞ্জ করা হলো
+                    'notifiable_type' => 'App\\Models\\User',
+                    'notifiable_id' => $ticket->user->id,
+                    'data' => $notificationData,
+                    'read_at' => null,
+                    'created_at' => now()->toISOString(),
+                    'updated_at' => now()->toISOString(),
+                ];
+
+                event(new \App\Events\NotificationSent($ticket->user, $notificationObj));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Ticket Reply Realtime Notification Error: ' . $e->getMessage());
+            }
         }
 
         return response()->json([

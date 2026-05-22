@@ -17,12 +17,17 @@ use App\Models\BiodataPreference;
 use App\Models\SupportTicket;
 use App\Models\LoginHistory;
 use App\Models\UserRestrictionLog;
+use Illuminate\Database\Eloquent\BroadcastsEvents;
+use Illuminate\Broadcasting\PrivateChannel;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\ServiceProvider;
 
 #[Fillable(['name', 'email', 'password', 'total_connections', 'role', 'restriction_expires_at', 'restriction_reason','mobile','google_id','avatar','gender'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
     use HasFactory, Notifiable, HasApiTokens;
+    use BroadcastsEvents;
 
     protected function casts(): array
     {
@@ -62,7 +67,11 @@ class User extends Authenticatable
         return $this->hasMany(SupportTicket::class, 'user_id');
     }
 
-    public function isAdmin() { return $this->role === 'admin'; }
+public function isAdmin()
+{
+    // এখন থেকে যেখানেই isAdmin কল হবে, সে চেক করবে ইউজার এই ৩টির যেকোনো একটি কিনা
+    return in_array($this->role, ['super_admin', 'admin', 'moderator']);
+}
 
     // তার বিরুদ্ধে করা রিপোর্ট
     public function reportsReceived() {
@@ -83,4 +92,6 @@ class User extends Authenticatable
     public function restrictionLogs() {
         return $this->hasMany(UserRestrictionLog::class, 'user_id')->latest();
     }
+
+
 }

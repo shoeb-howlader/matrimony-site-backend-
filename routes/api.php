@@ -33,11 +33,16 @@ use App\Http\Controllers\Admin\AdminSettingsController;
 use App\Http\Controllers\UserDashboardController;
 use App\Http\Controllers\SocialiteController;
 use Illuminate\Support\Facades\Broadcast;
+use App\Jobs\SendGlobalNotificationJob;
+use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Facades\Gate;
 
 Broadcast::routes(['middleware' => ['auth:sanctum']]);
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
+Route::post('/forgot-password/send-otp', [AuthController::class, 'sendOtp']);
+Route::post('/forgot-password/reset', [AuthController::class, 'resetPassword']);
 
 Route::get('/user', function (Request $request) {
     return $request->user();
@@ -55,22 +60,6 @@ Route::get('/biodatas/{biodata_no}', [BiodataController::class, 'show']);
 Route::post('/biodata/record-view', [BiodataViewController::class, 'recordView']);
 Route::get('/biodata/viewed-ids', [BiodataViewController::class, 'getViewedIds']);
 
-
-
-// Admin Only
-Route::middleware(['auth:sanctum', 'can:admin-only'])->group(function () {
-    Route::patch('/biodatas/{id}/approve', [BiodataController::class, 'approve']);
-});
-
-
-// 🔴 অ্যাডমিন রাউট গ্রুপ (অবশ্যই Admin Middleware থাকতে হবে)
-Route::middleware(['auth:sanctum', 'isAdmin'])->prefix('admin')->group(function () {
-
-
-
-
-
-});
 
 // সকল বিভাগের তালিকা
 Route::get('/locations/divisions', function () {
@@ -109,7 +98,7 @@ Route::post('/auth/{provider}/callback', [SocialiteController::class, 'handlePro
 | Protected Routes (শুধুমাত্র লগইন করা ইউজাররা অ্যাক্সেস পাবে)
 |--------------------------------------------------------------------------
 */
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware('auth:sanctum','check.banned')->group(function () {
 
     // Save Step 1
     Route::post('/user/biodata/step-1', [BiodataController::class, 'saveStep1']);
@@ -196,19 +185,11 @@ Route::post('/payment/cancel', [PaymentController::class, 'cancel']);
 Route::post('/contact-message', [ContactController::class, 'submitContactMessage']);
 
 // 🔴 Admin Routes
-Route::prefix('admin')->middleware(['auth:sanctum', 'admin'])->group(function () {
+Route::prefix('admin')->middleware([
+    'auth:sanctum',
+    \App\Http\Middleware\AdminMiddleware::class
+])->group(function () {
 
-    // টেস্ট করার জন্য একটি ডামি রাউট
-    /*Route::get('/dashboard-stats', function () {
-        return response()->json([
-            'success' => true,
-            'message' => 'Welcome to Admin Dashboard!',
-            'data' => [
-                'total_users' => \App\Models\User::count(),
-                'total_biodatas' => \App\Models\Biodata::count(),
-            ]
-        ]);
-    });*/
     Route::get('/dashboard-stats', [AdminDashboardController::class, 'index']);
 
     // ভবিষ্যতে অ্যাডমিনের সব রাউট (যেমন: Approve Biodata, Manage Users) এই গ্রুপের ভেতরেই থাকবে
@@ -232,6 +213,13 @@ Route::prefix('admin')->middleware(['auth:sanctum', 'admin'])->group(function ()
     Route::get('/user/{id}', [AdminUserController::class, 'getUserDetails']);
     Route::post('/user/{id}/update', [AdminUserController::class, 'updateUser']);
 
+    ////// এখানে এডমিনদের জন্য রাউট
+    // ─── 🔴 শুধুমাত্র অ্যাডমিন এবং সুপার অ্যাডমিনদের জন্য (পেমেন্ট, প্যাকেজ, সেটিংস) ───
+    Route::middleware('can:manage-finance-settings')->group(function () {
+        // User Profile Routes
+    Route::get('/user/{id}', [AdminUserController::class, 'getUserDetails']);
+    Route::post('/user/{id}/update', [AdminUserController::class, 'updateUser']);
+
     // Payment Management Routes
     Route::get('/payments', [\App\Http\Controllers\Admin\AdminPaymentController::class, 'index']);
     Route::post('/payment/{id}/status', [\App\Http\Controllers\Admin\AdminPaymentController::class, 'changeStatus']);
@@ -239,6 +227,8 @@ Route::prefix('admin')->middleware(['auth:sanctum', 'admin'])->group(function ()
 
     //admin user biodata purchase view
     Route::get('/user-purchases', [\App\Http\Controllers\Admin\AdminUserPurchaseController::class, 'index']);
+
+    });
 
         // সাপোর্ট ও রিপোর্ট ম্যানেজমেন্টের রাউট
     Route::get('/support-tickets', [AdminSupportController::class, 'index']); // সব টিকিট দেখা
@@ -312,5 +302,19 @@ Route::post('/user/{id}/remove-restriction', [AdminUserController::class, 'remov
     Route::post('/notifications/read-all', [App\Http\Controllers\Admin\AdminSettingsController::class, 'markAllAsRead']);
     Route::get('/notifications/all', [App\Http\Controllers\Admin\AdminSettingsController::class, 'getAllNotifications']);
     Route::delete('/notifications/{id}', [App\Http\Controllers\Admin\AdminSettingsController::class, 'deleteNotification']);
+    // golbal notification
+    Route::post('/notifications/global', [AdminUserController::class, 'sendGlobalNotification']);
+
+    // অ্যাডমিনদের লিস্ট দেখা
+    Route::get('/admins', [AdminUserController::class, 'getAdmins']);
+    // ─── 🔴 শুধুমাত্র সুপার অ্যাডমিনের জন্য (অ্যাডমিন তৈরি বা ডিলিট করা) ───
+    // ইউজারের রোল আপডেট করা (যেমন: ইউজার থেকে অ্যাডমিন বানানো)
+    Route::middleware('can:manage-staff')->group(function () {
+        Route::post('/users/{id}/update-role', [AdminUserController::class, 'updateUserRole']);
+    Route::post('/users/promote', [AdminUserController::class, 'promoteUser']);
+        // যদি অ্যাডমিন ডিলিট করার কোনো রাউট থাকে, সেটা এখানে দেবেন
+    });
+
+
 
 });

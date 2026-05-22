@@ -16,6 +16,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
         // 🔴 'admin' নামে মিডলওয়্যারটি রেজিস্টার করা হলো
         'admin' => \App\Http\Middleware\IsAdmin::class,
+        'check.banned' => \App\Http\Middleware\CheckBannedUser::class,
     ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

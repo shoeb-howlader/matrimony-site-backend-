@@ -12,11 +12,14 @@ use App\Models\Upazila;
 use App\Models\Union;
 use App\Models\BiodataPreference;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Database\Eloquent\BroadcastsEvents; // 🔴 এটি ইম্পোর্ট করুন
+use Illuminate\Broadcasting\PrivateChannel;
 
 class Biodata extends Model
 {
     use HasFactory;
     use SoftDeletes;
+    use BroadcastsEvents; // 🔴 ট্রেইটটি ব্যবহার করুন
 
     /**
      * The attributes that are mass assignable.
@@ -127,4 +130,6 @@ class Biodata extends Model
     {
         return $query->where('status', 'approved');
     }
+
+
 }

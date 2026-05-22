@@ -8,6 +8,8 @@ use Illuminate\Http\Request;
 use App\Notifications\BiodataApprovedNotification;
 use App\Notifications\BiodataRejectedNotification;
 use Illuminate\Support\Facades\DB;
+use App\Events\NotificationSent;
+use Illuminate\Support\Str;
 
 class AdminBiodataController extends Controller
 {
@@ -115,15 +117,73 @@ class AdminBiodataController extends Controller
         return response()->json(['success' => true, 'data' => $biodatas]);
     }
 
-    public function changeStatus(Request $request, $id) {
-        $biodata = Biodata::findOrFail($id);
-        $biodata->status = $request->status;
-        if ($request->status === 'rejected') {
+public function changeStatus(Request $request, $id)
+    {
+        // 🔴 নোটিফিকেশন পাঠানোর জন্য ইউজারের তথ্যও সাথে লোড করা হলো
+        $biodata = Biodata::with('user')->findOrFail($id);
+
+        $oldStatus = $biodata->status;
+        $newStatus = $request->status;
+
+        $biodata->status = $newStatus;
+
+        if ($newStatus === 'rejected') {
             $biodata->rejection_reason = $request->reason;
+            $biodata->is_hidden = 1; // রিজেক্ট হলে হাইড করে দেওয়া ভালো
+        } elseif ($newStatus === 'approved') {
+            $biodata->is_hidden = 0; // অ্যাপ্রুভ হলে শো করবে
         }
+
         $biodata->save();
+
+        // ── 🔴 নোটিফিকেশন লজিক শুরু ──
+        if ($biodata->user && $oldStatus !== $newStatus) {
+            try {
+                $notificationType = null;
+                $dbNotification = null;
+
+                // যদি অ্যাপ্রুভ করা হয়
+                if ($newStatus === 'approved') {
+                    $dbNotification = new \App\Notifications\BiodataApprovedNotification($biodata);
+                    $notificationType = 'App\\Notifications\\BiodataApprovedNotification';
+                }
+                // যদি রিজেক্ট করা হয়
+                elseif ($newStatus === 'rejected') {
+                    $reasonText = $request->reason ?? 'অ্যাডমিন কর্তৃক বাতিল করা হয়েছে';
+                    $dbNotification = new \App\Notifications\BiodataRejectedNotification($reasonText);
+                    $notificationType = 'App\\Notifications\\BiodataRejectedNotification';
+                }
+
+                // যদি স্ট্যাটাস অ্যাপ্রুভ বা রিজেক্ট হয়, তাহলেই শুধু নোটিফিকেশন যাবে
+                if ($dbNotification) {
+                    // ১. ডাটাবেস নোটিফিকেশন সেভ করা
+                    $biodata->user->notify($dbNotification);
+
+                    // 🔴 ২. ক্লাস থেকে সরাসরি ডাটা এক্সট্র্যাক্ট করা (DRY Principle) 🔴
+                    $notificationData = $dbNotification->toArray($biodata->user);
+
+                    // ৩. Reverb এর মাধ্যমে রিয়েল-টাইম পুশ করা
+                    $notificationObj = [
+                        'id' => \Illuminate\Support\Str::uuid()->toString(),
+                        'type' => $notificationType,
+                        'notifiable_type' => 'App\\Models\\User',
+                        'notifiable_id' => $biodata->user->id,
+                        'data' => $notificationData, // 👈 ডাটাবেসের হুবহু সেম ডাটা এখানে বসে গেলো
+                        'read_at' => null,
+                        'created_at' => now()->toISOString(),
+                        'updated_at' => now()->toISOString(),
+                    ];
+
+                    event(new \App\Events\NotificationSent($biodata->user, $notificationObj));
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Status Change Notification Error: ' . $e->getMessage());
+            }
+        }
+
         return response()->json(['success' => true]);
     }
+
 
     public function bulkAction(Request $request)
     {
@@ -143,7 +203,9 @@ class AdminBiodataController extends Controller
                 ]);
                 $biodata->delete();
             }
-        } elseif ($action === 'rejected') {
+        }
+        // ── 🔴 বাল্ক রিজেক্ট (Bulk Reject) ──
+        elseif ($action === 'rejected') {
             $biodatas = Biodata::with('user')->whereIn('id', $ids)->get();
             foreach ($biodatas as $biodata) {
                 $biodata->update([
@@ -153,14 +215,92 @@ class AdminBiodataController extends Controller
                 ]);
 
                 if ($biodata->user) {
-                    $biodata->user->notify(new BiodataRejectedNotification($reason));
+                    // 🔴 ১. নোটিফিকেশন ক্লাসটি ইনিশিয়ালাইজ করা হলো (রিজন সহ)
+                    $notification = new \App\Notifications\BiodataRejectedNotification($reason);
+
+                    // 🔴 ২. ডাটাবেস নোটিফিকেশন
+                    $biodata->user->notify($notification);
+
+                    // 🔴 ৩. Reverb রিয়েল-টাইম নোটিফিকেশন (ক্লাস থেকেই সরাসরি ডাটা নেওয়া হলো)
+                    try {
+                        $notificationData = $notification->toArray($biodata->user);
+
+                        $notificationObj = [
+                            'id' => \Illuminate\Support\Str::uuid()->toString(),
+                            'type' => 'App\\Notifications\\BiodataRejectedNotification',
+                            'notifiable_type' => 'App\\Models\\User',
+                            'notifiable_id' => $biodata->user->id,
+                            'data' => $notificationData, // 👈 ডাটাবেসের হুবহু সেম ডাটা
+                            'read_at' => null,
+                            'created_at' => now()->toISOString(),
+                            'updated_at' => now()->toISOString(),
+                        ];
+
+                        event(new \App\Events\NotificationSent($biodata->user, $notificationObj));
+                    } catch (\Exception $e) {
+                        \Illuminate\Support\Facades\Log::error('Bulk Reject Notification Error: ' . $e->getMessage());
+                    }
                 }
             }
-        } else {
+        }
+        // ── 🔴 বাল্ক অ্যাপ্রুভ (Bulk Approve) ──
+        elseif ($action === 'approved') {
+            // বায়োডাটা নাম্বার জেনারেট করার জন্য ট্রানজেকশন ব্যবহার করা হলো
+            \Illuminate\Support\Facades\DB::transaction(function () use ($ids) {
+                $biodatas = Biodata::with('user')->lockForUpdate()->whereIn('id', $ids)->get();
+
+                foreach ($biodatas as $biodata) {
+                    // যদি বায়োডাটা নাম্বার না থাকে, তাহলে নতুন জেনারেট করা হবে
+                    if (!$biodata->biodata_no) {
+                        $maxNo = Biodata::withTrashed()->max('biodata_no');
+                        $maxNo = (int) $maxNo;
+                        if ($maxNo < 1000) {
+                            $maxNo = 1000;
+                        }
+                        $biodata->biodata_no = $maxNo + 1;
+                    }
+
+                    $biodata->status = 'approved';
+                    $biodata->is_hidden = 0;
+                    $biodata->save();
+
+                    // নোটিফিকেশন পাঠানো
+                    if ($biodata->user) {
+                        // 🔴 ১. নোটিফিকেশন ক্লাসটি ইনিশিয়ালাইজ করা হলো
+                        $notification = new \App\Notifications\BiodataApprovedNotification($biodata);
+
+                        // 🔴 ২. ডাটাবেস নোটিফিকেশন
+                        $biodata->user->notify($notification);
+
+                        // 🔴 ৩. Reverb রিয়েল-টাইম নোটিফিকেশন (ক্লাস থেকেই সরাসরি ডাটা নেওয়া হলো)
+                        try {
+                            $notificationData = $notification->toArray($biodata->user);
+
+                            $notificationObj = [
+                                'id' => \Illuminate\Support\Str::uuid()->toString(),
+                                'type' => 'App\\Notifications\\BiodataApprovedNotification',
+                                'notifiable_type' => 'App\\Models\\User',
+                                'notifiable_id' => $biodata->user->id,
+                                'data' => $notificationData, // 👈 ডাটাবেসের হুবহু সেম ডাটা
+                                'read_at' => null,
+                                'created_at' => now()->toISOString(),
+                                'updated_at' => now()->toISOString(),
+                            ];
+
+                            event(new \App\Events\NotificationSent($biodata->user, $notificationObj));
+                        } catch (\Exception $e) {
+                            \Illuminate\Support\Facades\Log::error('Bulk Approve Notification Error: ' . $e->getMessage());
+                        }
+                    }
+                }
+            });
+        }
+        // অন্যান্য যেকোনো স্ট্যাটাসের জন্য (যেমন: pending)
+        else {
             Biodata::whereIn('id', $ids)->update(['status' => $action]);
         }
 
-        return response()->json(['success' => true, 'message' => 'বাল্ক অ্যাকশন সফল হয়েছে']);
+        return response()->json(['success' => true, 'message' => 'বাল্ক অ্যাকশন সফল হয়েছে']);
     }
 
     public function exportBiodatas(Request $request)
@@ -221,7 +361,7 @@ class AdminBiodataController extends Controller
         return response()->stream($callback, 200, $headers);
     }
 
-    public function approveBiodata($id)
+public function approveBiodata($id)
     {
         return DB::transaction(function () use ($id) {
             $biodata = Biodata::lockForUpdate()->findOrFail($id);
@@ -240,7 +380,32 @@ class AdminBiodataController extends Controller
             $biodata->save();
 
             if ($biodata->user) {
-                $biodata->user->notify(new BiodataApprovedNotification());
+                // 🔴 ১. নোটিফিকেশন ক্লাসটি ইনিশিয়ালাইজ করা হলো
+                $notification = new \App\Notifications\BiodataApprovedNotification($biodata);
+
+                // 🔴 ২. ডাটাবেসে নোটিফিকেশন সেভ করা
+                $biodata->user->notify($notification);
+
+                // 🔴 ৩. Reverb রিয়েল-টাইম নোটিফিকেশন (ক্লাস থেকেই সরাসরি ডাটা নেওয়া হলো)
+                try {
+                    // ক্লাসের toArray() থেকে ডাটা নিয়ে নিচ্ছি, তাই ম্যানুয়ালি কিছু লিখতে হলো না!
+                    $notificationData = $notification->toArray($biodata->user);
+
+                    $notificationObj = [
+                        'id' => \Illuminate\Support\Str::uuid()->toString(),
+                        'type' => 'App\\Notifications\\BiodataApprovedNotification',
+                        'notifiable_type' => 'App\\Models\\User',
+                        'notifiable_id' => $biodata->user->id,
+                        'data' => $notificationData, // 👈 ডাটাবেসের হুবহু সেম ডাটা এখানে বসে গেলো
+                        'read_at' => null,
+                        'created_at' => now()->toISOString(),
+                        'updated_at' => now()->toISOString(),
+                    ];
+
+                    event(new \App\Events\NotificationSent($biodata->user, $notificationObj));
+                } catch (\Exception $e) {
+                    \Illuminate\Support\Facades\Log::error('Approve Notification Realtime Error: ' . $e->getMessage());
+                }
             }
 
             return response()->json([
@@ -250,7 +415,7 @@ class AdminBiodataController extends Controller
         });
     }
 
-    public function rejectBiodata(Request $request, $id)
+   public function rejectBiodata(Request $request, $id)
     {
         $request->validate(['reason' => 'required|string|max:500']);
         $biodata = Biodata::with('user')->findOrFail($id);
@@ -261,7 +426,32 @@ class AdminBiodataController extends Controller
         $biodata->save();
 
         if ($biodata->user) {
-            $biodata->user->notify(new BiodataRejectedNotification($request->reason));
+            // 🔴 ১. নোটিফিকেশন ক্লাসটি ইনিশিয়ালাইজ করা হলো (রিজন সহ)
+            $notification = new \App\Notifications\BiodataRejectedNotification($request->reason);
+
+            // 🔴 ২. ডাটাবেস নোটিফিকেশন সেভ করা
+            $biodata->user->notify($notification);
+
+            // 🔴 ৩. Reverb রিয়েল-টাইম নোটিফিকেশন (ক্লাস থেকেই সরাসরি ডাটা নেওয়া হলো)
+            try {
+                // ক্লাসের toArray() থেকে ডাটা নিয়ে নিচ্ছি, ফলে ডাটা মিসম্যাচ হওয়ার কোনো সুযোগ নেই
+                $notificationData = $notification->toArray($biodata->user);
+
+                $notificationObj = [
+                    'id' => \Illuminate\Support\Str::uuid()->toString(),
+                    'type' => 'App\\Notifications\\BiodataRejectedNotification',
+                    'notifiable_type' => 'App\\Models\\User',
+                    'notifiable_id' => $biodata->user->id,
+                    'data' => $notificationData, // 👈 ডাটাবেসের হুবহু সেম ডাটা এখানে বসে গেলো
+                    'read_at' => null,
+                    'created_at' => now()->toISOString(),
+                    'updated_at' => now()->toISOString(),
+                ];
+
+                event(new \App\Events\NotificationSent($biodata->user, $notificationObj));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Reject Notification Realtime Error: ' . $e->getMessage());
+            }
         }
 
         return response()->json(['success' => true, 'message' => 'বায়োডাটা বাতিল করা হয়েছে।']);
